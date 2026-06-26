@@ -1,5 +1,5 @@
 [project]
-name = "dougs-mcp"
+name = "dougs-mcp-server"
 version = "0.1.0"
 description = "MCP server for Dougs online accounting (app.dougs.fr)"
 readme = "README.md"
@@ -17,8 +17,11 @@ dependencies = [
 dougs-mcp = "dougs_mcp:main"
 
 [build-system]
-requires = ["uv_build>=0.11.24,<0.12.0"]
-build-backend = "uv_build"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dougs_mcp"]
 
 [dependency-groups]
 dev = [
