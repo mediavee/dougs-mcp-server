@@ -2,18 +2,28 @@
 
 MCP server for [Dougs](https://www.dougs.fr) online accounting.
 
-It exposes read-only tools over Dougs' internal API (`app.dougs.fr`) so an MCP
-client (Claude Code, Claude Desktop, …) can query your accounting data.
+It exposes tools over Dougs' internal API (`app.dougs.fr`) so an MCP client
+(Claude Code, Claude Desktop, …) can query — and update — your accounting data.
 
-> Unofficial. This talks to the same private API the Dougs web app uses,
-> authenticating with your own credentials. It may break if Dougs changes their
-> backend. Read-only for now.
+> **Unofficial.** This talks to the same private API the Dougs web app uses,
+> authenticating with your own credentials, and may break if Dougs changes their
+> backend. Most tools are read-only; the few that modify your data are listed
+> under [Write tools](#write-tools).
 
 ## How it works
 
 - **Auth**: automatic login via `POST /auth/api/login` with `{email, password}`.
-  The session cookie is kept in an httpx cookie jar and refreshed on `401`.
+  The session cookie is kept in an httpx cookie jar and refreshed transparently
+  on `401`.
 - **Base URL**: `https://app.dougs.fr`
+- **Company**: most tools act on a company id. It defaults to your preferred
+  company — override per call with `company_id`, or pin one via
+  `DOUGS_COMPANY_ID`.
+
+## Requirements
+
+- Python ≥ 3.13
+- [uv](https://docs.astral.sh/uv/)
 
 ## Setup
 
@@ -31,6 +41,8 @@ DOUGS_PASSWORD=your-password
 ```
 
 ## Tools
+
+### Read tools
 
 | Tool | Description |
 |------|-------------|
@@ -89,4 +101,11 @@ In `claude_desktop_config.json`:
     }
   }
 }
+```
+
+## Development
+
+```bash
+uv run ruff check src
+uv run mypy src
 ```
