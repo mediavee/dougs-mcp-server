@@ -3,13 +3,12 @@ name = "dougs-mcp-server"
 version = "0.1.0"
 description = "MCP server for Dougs online accounting (app.dougs.fr)"
 readme = "README.md"
-authors = [
-    { name = "falistos", email = "falistos@gmail.com" }
-]
 requires-python = ">=3.13"
+license = { text = "Proprietary" }
+authors = [{ name = "Mediavee" }]
 dependencies = [
     "httpx>=0.28.1",
-    "mcp>=1.28.0",
+    "fastmcp>=3.2.4,<4.0.0",
     "pydantic-settings>=2.0",
 ]
 
@@ -30,11 +29,28 @@ dev = [
 ]
 
 [tool.ruff]
-target-version = "py313"
 line-length = 100
+target-version = "py313"
+src = ["src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "B", "SIM", "UP", "RUF", "ASYNC", "S", "PTH", "DTZ", "I"]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # isort
+    "N",             # pep8-naming
+    "UP",            # pyupgrade
+    "B",             # flake8-bugbear
+    "SIM",           # flake8-simplify
+    "RUF",           # ruff-specific
+    "ASYNC",         # flake8-async
+    "PTH",           # pathlib
+    "TID",           # tidy imports
+]
+ignore = ["E501"]    # line length handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.mypy]
 python_version = "3.13"
