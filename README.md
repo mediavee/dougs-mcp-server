@@ -83,7 +83,7 @@ These **modify** your accounting data:
 ## Use with Claude Code
 
 ```bash
-claude mcp add dougs -- uv --directory /Users/falistos/Workspace/tools/mcp/dougs-mcp-server run dougs-mcp
+claude mcp add dougs -- uv --directory /absolute/path/to/dougs-mcp-server run dougs-mcp
 ```
 
 Credentials are read from the project's `.env` (thanks to `--directory`).
@@ -97,7 +97,7 @@ In `claude_desktop_config.json`:
   "mcpServers": {
     "dougs": {
       "command": "uv",
-      "args": ["--directory", "/Users/falistos/Workspace/tools/mcp/dougs-mcp-server", "run", "dougs-mcp"]
+      "args": ["--directory", "/absolute/path/to/dougs-mcp-server", "run", "dougs-mcp"]
     }
   }
 }
