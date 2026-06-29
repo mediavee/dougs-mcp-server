@@ -193,8 +193,15 @@ async def list_operations(
     client = _get_client()
     cid = await client.resolve_company_id(company_id)
     params = _operation_filters(
-        query, amount, date_from, date_to, inbound, operation_type,
-        treasury_account_id, validated, needs_attention,
+        query,
+        amount,
+        date_from,
+        date_to,
+        inbound,
+        operation_type,
+        treasury_account_id,
+        validated,
+        needs_attention,
     )
     params["limit"] = max(1, min(limit, MAX_PAGE))
     params["offset"] = offset
