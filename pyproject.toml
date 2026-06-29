@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "MCP server for Dougs online accounting (app.dougs.fr)"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "Proprietary" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Mediavee" }]
 dependencies = [
     "httpx>=0.28.1",
