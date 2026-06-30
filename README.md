@@ -77,8 +77,8 @@ These **modify** your accounting data:
 | Tool | Description |
 |------|-------------|
 | `validate_operation` | Validate / un-validate an operation (confirms its categorization; `validated=False` re-opens it) |
-| `attach_justificatif` | Attach a local file (PDF/image receipt or invoice) to an operation |
-| `detach_justificatif` | Remove an attachment from an operation (by `attachment_id`) |
+| `add_attachment` | Attach a local file (PDF/image receipt or invoice) to an operation |
+| `remove_attachment` | Remove an attachment from an operation (by `attachment_id`) |
 
 ## Use with Claude Code
 

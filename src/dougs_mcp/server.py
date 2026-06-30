@@ -186,7 +186,7 @@ async def list_operations(
 
     By default each breakdown is enriched with a resolved `category`
     (wording / group / accountingNumber); set resolve_categories=False for the
-    raw, lighter payload. Justificatifs are under
+    raw, lighter payload. Attachments are under
     sourceDocumentAttachments[].sourceDocument.file.url — pass that path to
     get_file_url to obtain a downloadable link.
     """
@@ -409,16 +409,16 @@ def _read_upload(file_path: str) -> tuple[str, bytes, str]:
 
 
 @mcp.tool()
-async def attach_justificatif(
+async def add_attachment(
     operation_id: int,
     file_path: str,
     company_id: int | None = None,
 ) -> dict[str, Any]:
-    """Attach a justificatif (receipt/invoice file) to an operation.
+    """Attach a supporting document (receipt/invoice file) to an operation.
 
     file_path is a path to a local file (PDF or image). Returns the updated
     operation; the new attachment is in sourceDocumentAttachments (its `id` is
-    what detach_justificatif needs).
+    what remove_attachment needs).
     """
     name, content, content_type = await asyncio.to_thread(_read_upload, file_path)
     client = _get_client()
@@ -430,12 +430,12 @@ async def attach_justificatif(
 
 
 @mcp.tool()
-async def detach_justificatif(
+async def remove_attachment(
     operation_id: int,
     attachment_id: int,
     company_id: int | None = None,
 ) -> Any:
-    """Detach a justificatif from an operation by attachment id.
+    """Remove an attachment from an operation by attachment id.
 
     The attachment id is sourceDocumentAttachments[].id on the operation.
     """
