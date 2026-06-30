@@ -37,7 +37,7 @@ cp .env.example .env   # then fill in your credentials
 ```
 DOUGS_EMAIL=you@example.com
 DOUGS_PASSWORD=your-password
-# DOUGS_COMPANY_ID=18533   # optional; defaults to your preferred company
+# DOUGS_COMPANY_ID=12345   # optional; defaults to your preferred company
 ```
 
 ## Tools

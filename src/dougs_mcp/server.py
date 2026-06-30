@@ -450,7 +450,7 @@ async def detach_justificatif(
 async def raw_get(path: str, params: dict[str, Any] | None = None) -> Any:
     """Low-level authenticated GET on the Dougs API (read-only).
 
-    Use for endpoints not yet wrapped, e.g. '/companies/18533/invoices'.
+    Use for endpoints not yet wrapped, e.g. '/companies/12345/invoices'.
     Path is relative to the API base URL.
     """
     if not path.startswith("/"):
