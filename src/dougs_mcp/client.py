@@ -35,13 +35,13 @@ class DougsClient:
     def __init__(self, settings: Settings) -> None:
         self._s = settings
         self._http = httpx.AsyncClient(
-            base_url=settings.base_url,
+            base_url=settings.dougs_base_url,
             headers={
                 "User-Agent": _USER_AGENT,
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-                "Origin": settings.base_url,
-                "Referer": f"{settings.base_url}/app/",
+                "Origin": settings.dougs_base_url,
+                "Referer": f"{settings.dougs_base_url}/app/",
             },
             follow_redirects=True,
             timeout=httpx.Timeout(30.0),
@@ -56,7 +56,10 @@ class DougsClient:
         try:
             resp = await self._http.post(
                 "/auth/api/login",
-                json={"email": self._s.email, "password": self._s.password.get_secret_value()},
+                json={
+                    "email": self._s.dougs_email,
+                    "password": self._s.dougs_password.get_secret_value(),
+                },
             )
         except httpx.HTTPError as exc:  # network / TLS failures
             raise DougsAuthError(f"login request failed: {exc}") from exc
@@ -125,8 +128,8 @@ class DougsClient:
         """Pick the company id: explicit arg > configured > user's preferred > first."""
         if override is not None:
             return override
-        if self._s.company_id is not None:
-            return self._s.company_id
+        if self._s.dougs_company_id is not None:
+            return self._s.dougs_company_id
         me = await self.get("/users/me")
         preferred = me.get("preferredCompanyId")
         if preferred:

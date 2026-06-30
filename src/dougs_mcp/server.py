@@ -8,7 +8,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from .client import MAX_PAGE, DougsClient
-from .config import Settings
+from .config import load_settings
 
 mcp = FastMCP("dougs")
 
@@ -38,7 +38,7 @@ _client: DougsClient | None = None
 def _get_client() -> DougsClient:
     global _client
     if _client is None:
-        _client = DougsClient(Settings())  # raises if DOUGS_EMAIL/DOUGS_PASSWORD missing
+        _client = DougsClient(load_settings())  # raises if DOUGS_EMAIL/DOUGS_PASSWORD missing
     return _client
 
 
