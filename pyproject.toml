@@ -10,8 +10,13 @@ authors = [{ name = "Mediavee" }]
 dependencies = [
     "httpx>=0.28.1",
     "fastmcp>=3.2.4,<4.0.0",
-    "pydantic-settings>=2.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/mediavee/dougs-mcp-server"
+Issues = "https://github.com/mediavee/dougs-mcp-server/issues"
 
 [project.scripts]
 dougs-mcp = "dougs_mcp:main"
