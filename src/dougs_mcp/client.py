@@ -56,7 +56,7 @@ class DougsClient:
         try:
             resp = await self._http.post(
                 "/auth/api/login",
-                json={"email": self._s.email, "password": self._s.password},
+                json={"email": self._s.email, "password": self._s.password.get_secret_value()},
             )
         except httpx.HTTPError as exc:  # network / TLS failures
             raise DougsAuthError(f"login request failed: {exc}") from exc
