@@ -17,6 +17,15 @@ _USER_AGENT = (
 )
 
 
+def _error_detail(resp: httpx.Response) -> str:
+    """Dougs puts a human-readable reason in x-user-message / x-message headers."""
+    for header in ("x-user-message", "x-message"):
+        message = resp.headers.get(header)
+        if message:
+            return message
+    return resp.text[:200]
+
+
 class DougsError(Exception):
     """Generic API error surfaced to the caller."""
 
@@ -67,11 +76,13 @@ class DougsClient:
 
         if resp.status_code in (401, 403):
             raise DougsAuthError(
-                "login rejected (status "
-                f"{resp.status_code}). Check credentials, or Cloudflare/2FA blocking."
+                f"login rejected (status {resp.status_code}): {_error_detail(resp)}. "
+                "Check credentials, or Cloudflare/2FA blocking."
             )
         if resp.status_code >= 400:
-            raise DougsAuthError(f"login failed with status {resp.status_code}")
+            raise DougsAuthError(
+                f"login failed with status {resp.status_code}: {_error_detail(resp)}"
+            )
 
         self._authenticated = True
         self._auth_gen += 1
@@ -99,7 +110,7 @@ class DougsClient:
             await self._reauth(gen)
             resp = await self._http.request(method, path, **kwargs)
         if resp.status_code >= 400:
-            raise DougsError(f"{method} {path} -> {resp.status_code}: {resp.text[:200]}")
+            raise DougsError(f"{method} {path} -> {resp.status_code}: {_error_detail(resp)}")
         return resp
 
     @staticmethod
