@@ -1,6 +1,10 @@
 """Async HTTP client for the Dougs internal API with automatic session login."""
 
 import asyncio
+import hashlib
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -26,6 +30,12 @@ def _error_detail(resp: httpx.Response) -> str:
     return resp.text[:200]
 
 
+def _session_path(email: str) -> Path:
+    """Per-account cookie cache, so restarting the server does not burn a login."""
+    root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "dougs-mcp"
+    return root / f"session-{hashlib.sha256(email.encode()).hexdigest()[:16]}.json"
+
+
 class DougsError(Exception):
     """Generic API error surfaced to the caller."""
 
@@ -37,8 +47,9 @@ class DougsAuthError(DougsError):
 class DougsClient:
     """Thin wrapper around the Dougs API.
 
-    Authentication is a session cookie set by POST /auth/api/login. httpx keeps
-    it in its cookie jar; we re-login transparently when the session expires.
+    Authentication is a session cookie set by POST /auth/api/login. The cookie
+    is cached on disk and reused across restarts — Dougs rate-limits logins to
+    25 per hour and per account — and we re-login transparently on a 401.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -61,6 +72,31 @@ class DougsClient:
         self._login_lock = asyncio.Lock()
         self._catalogs: dict[int, dict[int, dict[str, Any]]] = {}
         self._catalog_lock = asyncio.Lock()
+        self._session_path = _session_path(settings.dougs_email)
+        self._load_session()
+
+    def _load_session(self) -> None:
+        try:
+            cookies = json.loads(self._session_path.read_text())
+        except (OSError, ValueError):
+            return
+        for name, value in cookies.items():
+            self._http.cookies.set(name, value, domain=".dougs.fr")
+        self._authenticated = bool(cookies)
+
+    def _save_session(self) -> None:
+        cookies = dict(self._http.cookies)
+        if not cookies:
+            return
+        try:
+            self._session_path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic: several server instances share this file.
+            tmp = self._session_path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(cookies))
+            tmp.chmod(0o600)
+            tmp.replace(self._session_path)
+        except OSError:  # a read-only cache dir must not break the server
+            pass
 
     async def login(self) -> None:
         try:
@@ -74,6 +110,16 @@ class DougsClient:
         except httpx.HTTPError as exc:  # network / TLS failures
             raise DougsAuthError(f"login request failed: {exc}") from exc
 
+        if resp.status_code == 429:
+            # Dougs drops the x-ratelimit-* headers once blocking, so we cannot
+            # tell how long is left; retrying while blocked may keep it going.
+            reset = resp.headers.get("x-ratelimit-reset")
+            countdown = f" Retry in ~{int(reset) // 60} min." if reset else ""
+            raise DougsAuthError(
+                "login rate-limited by Dougs (25 logins per hour for this account)."
+                f"{countdown} Wait rather than retry; the cached session normally "
+                "avoids re-logging in at all."
+            )
         if resp.status_code in (401, 403):
             raise DougsAuthError(
                 f"login rejected (status {resp.status_code}): {_error_detail(resp)}. "
@@ -86,6 +132,7 @@ class DougsClient:
 
         self._authenticated = True
         self._auth_gen += 1
+        self._save_session()
 
     async def _ensure_auth(self) -> None:
         if self._authenticated:
@@ -109,6 +156,8 @@ class DougsClient:
         if resp.status_code == 401:
             await self._reauth(gen)
             resp = await self._http.request(method, path, **kwargs)
+        elif "set-cookie" in resp.headers:  # rolling session: keep the fresh cookie
+            self._save_session()
         if resp.status_code >= 400:
             raise DougsError(f"{method} {path} -> {resp.status_code}: {_error_detail(resp)}")
         return resp

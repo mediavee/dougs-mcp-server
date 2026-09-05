@@ -13,8 +13,9 @@ It exposes tools over Dougs' internal API (`app.dougs.fr`) so an MCP client
 ## How it works
 
 - **Auth**: automatic login via `POST /auth/api/login` with `{email, password}`.
-  The session cookie is kept in an httpx cookie jar and refreshed transparently
-  on `401`.
+  The session cookie is cached under `~/.cache/dougs-mcp/` (mode `600`) and
+  reused across restarts — Dougs allows only 25 logins per hour and per account
+  — then refreshed transparently on a `401`.
 - **Base URL**: `https://app.dougs.fr`
 - **Company**: most tools act on a company id. It defaults to your preferred
   company — override per call with `company_id`, or pin one via
