@@ -399,6 +399,333 @@ async def validate_operation(
     return await client.post(f"/companies/{cid}/operations/{operation_id}", json=operation)
 
 
+def _find_breakdown(operation: dict[str, Any], breakdown_id: int) -> dict[str, Any]:
+    for b in operation.get("breakdowns") or []:
+        if b.get("id") == breakdown_id:
+            return b
+    known = [b.get("id") for b in operation.get("breakdowns") or []]
+    raise ValueError(
+        f"breakdown {breakdown_id} not found on operation {operation.get('id')}; "
+        f"breakdown ids are {known}"
+    )
+
+
+def _slot_summary(
+    association: dict[str, Any], slot_name: str, slot: dict[str, Any]
+) -> dict[str, Any]:
+    """One answerable question on a breakdown, in the shape the tools take back."""
+    selected = slot.get("selectedItem") or {}
+    return {
+        "association": association.get("name"),
+        "slot": slot_name,
+        "question": association.get("message"),
+        "type": slot.get("type"),
+        "value": selected.get("value"),
+        "label": selected.get("label"),
+        "answered": selected.get("value") is not None,
+        "required": not slot.get("isOptional"),
+        "editable": bool(slot.get("isEditable")),
+        # Dougs hides some answerable questions from its own UI (the supplier
+        # behind a bank counterpart, for instance); they stay settable.
+        "prompted": bool(association.get("show", True)),
+    }
+
+
+def _slot_summaries(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        _slot_summary(a, name, slot)
+        for a in breakdown.get("associations") or []
+        for name, slot in (a.get("slots") or {}).items()
+    ]
+
+
+def _find_slot(
+    breakdown: dict[str, Any], association: str, slot: str | None
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Locate an association slot on a breakdown; the slot name is optional when unambiguous."""
+    match = next(
+        (a for a in breakdown.get("associations") or [] if a.get("name") == association), None
+    )
+    if match is None:
+        known = [a.get("name") for a in breakdown.get("associations") or []]
+        raise ValueError(
+            f"breakdown {breakdown.get('id')} has no '{association}' association; it has {known}"
+        )
+    slots = match.get("slots") or {}
+    if slot is None:
+        if len(slots) != 1:
+            raise ValueError(
+                f"association '{association}' has several slots {list(slots)}; pass slot="
+            )
+        slot = next(iter(slots))
+    if slot not in slots:
+        raise ValueError(f"association '{association}' has no slot '{slot}'; it has {list(slots)}")
+    return match, slot, slots[slot]
+
+
+def _category_vat(category: dict[str, Any]) -> dict[str, Any]:
+    """VAT facts about a category.
+
+    A category can be abstract: it stands for several variants (with/without
+    VAT, tourism/utility vehicle, per-country rates…) and Dougs then asks a
+    question to pick one, which is what settles the rate.
+    """
+    if not category.get("isAbstract"):
+        rate = (category.get("vat") or {}).get("rate")
+        if isinstance(rate, str):  # e.g. "fromEuCountries": the rate follows the country
+            return {"vatRate": None, "vatRateRule": rate, "asksQuestions": True}
+        return {"vatRate": rate, "asksQuestions": False}
+    rates = {(child.get("vat") or {}).get("rate") for child in category.get("children") or []}
+    return {
+        "vatRates": sorted(r for r in rates if isinstance(r, int | float)),
+        "asksQuestions": True,
+    }
+
+
+def _breakdown_summary(b: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": b.get("id"),
+        "amount": b.get("amount"),
+        "isInbound": b.get("isInbound"),
+        "isCounterpart": b.get("isCounterpart"),
+        "isFee": b.get("isFee"),
+        "wording": b.get("wording"),
+        "categoryId": b.get("categoryId"),
+        "resolvedCategoryId": b.get("resolvedCategoryId"),
+        "categoryWording": b.get("categoryWording"),
+        "vatRate": b.get("vatRate"),
+        "vatAmount": b.get("vatAmount"),
+        "manualVatAmount": b.get("manualVatAmount"),
+        "isVatAmountManuallyModified": b.get("isVatAmountManuallyModified"),
+        "isNonTaxable": b.get("isNonTaxable"),
+        "amountExcludingTaxes": b.get("amountExcludingTaxesWithRecoverageRate"),
+        "isCategoryEditable": b.get("isCategoryEditable"),
+        "isVatAmountEditable": b.get("isVatAmountEditable"),
+        "isAmountEditable": b.get("isAmountEditable"),
+        "isDeletable": b.get("isDeletable"),
+        "questions": _slot_summaries(b),
+    }
+
+
+def _operation_summary(operation: dict[str, Any]) -> dict[str, Any]:
+    """Compact view of an operation after a write (the raw payload is very verbose)."""
+    return {
+        "id": operation.get("id"),
+        "date": operation.get("date"),
+        "wording": operation.get("wording"),
+        "amount": operation.get("amount"),
+        "isInbound": operation.get("isInbound"),
+        "totalAmount": operation.get("totalAmount"),
+        "isTotalAmountValid": operation.get("isTotalAmountValid"),
+        "validated": operation.get("validated"),
+        "needsAttention": operation.get("needsAttention"),
+        "vatAmount": operation.get("vatAmount"),
+        "errors": operation.get("errors"),
+        "breakdowns": [_breakdown_summary(b) for b in operation.get("breakdowns") or []],
+    }
+
+
+@mcp.tool()
+async def get_operation(operation_id: int, company_id: int | None = None) -> dict[str, Any]:
+    """Return one operation as a compact, edit-oriented view.
+
+    Lists each breakdown (accounting line) with its category, VAT, what is
+    editable on it, and the `questions` (association slots) Dougs asks for that
+    line — the input the other editing tools take.
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    return _operation_summary(await client.operation(cid, operation_id))
+
+
+@mcp.tool()
+async def list_available_categories(
+    operation_id: int,
+    breakdown_id: int,
+    search: str | None = None,
+    is_refund: bool | None = None,
+    preferred_only: bool = False,
+    company_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """List the accounting categories assignable to a given breakdown.
+
+    The catalog is contextual: the API only returns the categories that make
+    sense for this line (direction, operation type, date). Use this before
+    set_breakdown_category to pick a valid category_id.
+
+    - search: server-side filter on labels and keywords (e.g. "restaurant").
+    - is_refund: True to list the refund counterparts instead.
+    - preferred_only: only the few categories Dougs suggests first for this line.
+
+    Entries are flagged `preferred` and sorted with those first. `vatRate` is
+    the rate the category applies; `asksQuestions=true` marks categories that
+    stand for several variants (with/without VAT, per-country rates…) — Dougs
+    then asks a question to settle the rate, so check `questions` after
+    assigning one (see list_breakdown_questions).
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    base = f"/companies/{cid}/operations/{operation_id}/breakdowns/{breakdown_id}"
+    params: dict[str, Any] = {}
+    if search:
+        params["search"] = search
+    if is_refund is not None:
+        params["isRefund"] = str(is_refund).lower()
+    preferred_ids, available_ids = await asyncio.gather(
+        client.get(f"{base}/preferred-categories"),
+        client.get(f"{base}/available-categories", params=params),
+    )
+    preferred = set(preferred_ids or [])
+    ids = [i for i in (available_ids or []) if not preferred_only or i in preferred]
+    catalog = await client.category_catalog(cid)
+    result = []
+    for i in ids:
+        cat = catalog.get(i) or {}
+        result.append(
+            {
+                "id": i,
+                "wording": cat.get("wording"),
+                "group": (cat.get("group") or {}).get("name"),
+                "accountingNumber": cat.get("accountingNumber"),
+                "description": cat.get("description"),
+                **_category_vat(cat),
+                "preferred": i in preferred,
+            }
+        )
+    result.sort(key=lambda c: (not c["preferred"], c["wording"] or ""))
+    return result
+
+
+@mcp.tool()
+async def search_categories(
+    search: str | None = None,
+    inbound: bool | None = None,
+    group: str | None = None,
+    limit: int = 50,
+    company_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Browse the company's whole accounting category catalog.
+
+    Use this to explore what exists without an operation at hand. When you are
+    actually categorizing a line, prefer list_available_categories: it only
+    returns what Dougs accepts for that line.
+
+    - search: matches the label, keywords and description (case-insensitive).
+    - inbound: True for incoming categories (revenue, refunds), False for
+      outgoing (expenses); omitted returns both.
+    - group: filters on the accounting group name, e.g. "Frais de fonctionnement".
+
+    Hidden internal variants are excluded; `asksQuestions=true` marks the
+    categories that stand for several variants (see list_available_categories).
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    catalog = await client.category_catalog(cid)
+    needle = (search or "").casefold()
+    group_needle = (group or "").casefold()
+    result = []
+    for cat in catalog.values():
+        if not cat.get("isAssignable") or cat.get("hidden"):
+            continue
+        group_name = (cat.get("group") or {}).get("name") or ""
+        if group_needle and group_needle not in group_name.casefold():
+            continue
+        if inbound is not None and cat.get("isInbound") is not inbound:
+            continue
+        if needle:
+            haystack = " ".join(
+                [
+                    cat.get("wording") or "",
+                    cat.get("description") or "",
+                    *(cat.get("keywords") or []),
+                ]
+            )
+            if needle not in haystack.casefold():
+                continue
+        result.append(
+            {
+                "id": cat.get("id"),
+                "wording": cat.get("wording"),
+                "group": group_name or None,
+                "accountingNumber": cat.get("accountingNumber"),
+                "description": cat.get("description"),
+                "isInbound": cat.get("isInbound"),
+                **_category_vat(cat),
+            }
+        )
+    result.sort(key=lambda c: (c["group"] or "", c["wording"] or ""))
+    return result[:limit]
+
+
+@mcp.tool()
+async def list_breakdown_questions(
+    operation_id: int,
+    breakdown_id: int,
+    company_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """List the questions (association slots) Dougs asks about a breakdown.
+
+    A category can require extra input before the line is complete: the VAT
+    exemption reason for a 0% line, the supplier, the loan, the partner and
+    period of a remuneration… Each entry gives the `association` / `slot` pair
+    to pass to list_question_options and set_breakdown_association, whether it
+    is answered, and whether it is required. `prompted=false` marks questions
+    Dougs does not surface in its own UI — still answerable, just not asked.
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    operation = await client.operation(cid, operation_id)
+    return _slot_summaries(_find_breakdown(operation, breakdown_id))
+
+
+@mcp.tool()
+async def list_question_options(
+    operation_id: int,
+    breakdown_id: int,
+    association: str,
+    slot: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    company_id: int | None = None,
+) -> dict[str, Any]:
+    """List the accepted answers for one breakdown question.
+
+    Works for both enum questions (VAT exemption reasons, charge types, periods)
+    and record questions (suppliers, partners, loans — `search` filters those
+    server-side). `slot` may be omitted when the association has a single slot.
+    Feed an item's `value` to set_breakdown_association.
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    operation = await client.operation(cid, operation_id)
+    breakdown = _find_breakdown(operation, breakdown_id)
+    _, slot_name, _ = _find_slot(breakdown, association, slot)
+    params: dict[str, Any] = {"offset": offset, "limit": limit}
+    if search:
+        params["q"] = search
+    data = await client.get(
+        f"/companies/{cid}/operations/{operation_id}/breakdowns/{breakdown_id}"
+        f"/associations/{association}/slots/{slot_name}/candidates",
+        params=params,
+    )
+    items = [
+        {"value": i.get("value"), "label": i.get("label"), "description": i.get("description")}
+        for i in (data.get("items") or [])
+    ]
+    preferred = [
+        {"value": i.get("value"), "label": i.get("label"), "description": i.get("description")}
+        for i in (data.get("preferredItems") or [])
+    ]
+    return {
+        "association": association,
+        "slot": slot_name,
+        "title": (data.get("descriptor") or {}).get("title"),
+        "items": items,
+        "preferredItems": preferred,
+    }
+
+
 def _read_upload(file_path: str) -> tuple[str, bytes, str]:
     """Read a local file off the event loop; returns (name, bytes, content_type)."""
     path = Path(file_path).expanduser()

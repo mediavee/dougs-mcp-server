@@ -51,7 +51,12 @@ DOUGS_PASSWORD=your-password
 | `list_companies` | Companies accessible to the user |
 | `get_company` | A company's accounting configuration |
 | `list_operations` | List/search bank operations — `query` (text), `amount` (`>1000`, `<500`, `1000-2000`), `date_from`/`date_to` (ISO), `inbound` (entrées/sorties), `operation_type`, `treasury_account_id`, `validated`, `needs_attention`; paginated via `limit` (max 500) / `offset` |
+| `get_operation` | One operation as a compact, edit-oriented view: each line with its category, VAT, what is editable, and the questions Dougs asks about it |
 | `get_categories` | Resolve operation category ids (`resolvedCategoryId`) to labels — wording, accounting group, account number |
+| `search_categories` | Browse the whole category catalog (no operation needed): `search` over labels/keywords/descriptions, `inbound`, `group` |
+| `list_available_categories` | Categories assignable to a given breakdown (contextual — 84 of 221 for a bank expense), with `search`, `is_refund`, `preferred_only` |
+| `list_breakdown_questions` | The questions (association slots) a breakdown still needs answered — VAT exemption reason, supplier, loan, partner… |
+| `list_question_options` | Accepted answers for one question (enum values, or records filtered by `search`) |
 | `list_sales_channels` | Configured sales channels |
 | `get_active_accounting_year` | Current fiscal year (id, opening/closing dates) |
 | `list_accounting_years` | All fiscal years |

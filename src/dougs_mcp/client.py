@@ -232,6 +232,10 @@ class DougsClient:
         catalog[category_id] = data
         return data
 
+    async def operation(self, company_id: int, operation_id: int) -> dict[str, Any]:
+        """Fetch a single operation with its breakdowns."""
+        return await self.get(f"/companies/{company_id}/operations/{operation_id}")
+
     async def resolve_file_url(self, path: str) -> str:
         """Resolve a Dougs file path (e.g. '/files/...') to its direct S3 URL.
 
