@@ -525,6 +525,10 @@ def _operation_summary(operation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _replace_breakdown(operation: dict[str, Any], updated: dict[str, Any]) -> list[dict[str, Any]]:
+    return [updated if b.get("id") == updated["id"] else b for b in operation["breakdowns"]]
+
+
 @mcp.tool()
 async def get_operation(operation_id: int, company_id: int | None = None) -> dict[str, Any]:
     """Return one operation as a compact, edit-oriented view.
@@ -724,6 +728,192 @@ async def list_question_options(
         "items": items,
         "preferredItems": preferred,
     }
+
+
+@mcp.tool()
+async def set_breakdown_category(
+    operation_id: int,
+    breakdown_id: int,
+    category_id: int,
+    company_id: int | None = None,
+) -> dict[str, Any]:
+    """Change the accounting category of one breakdown (line) of an operation.
+
+    breakdown_id is breakdowns[].id; get valid ids from
+    list_available_categories. The counterpart line (isCounterpart=true, the
+    bank side) is not categorizable.
+
+    Always re-read `questions` in the result: Dougs drops the answers the new
+    category has no use for, and does not restore them if you switch back. A
+    line categorized "Frais bancaires" with hasOptionalVat=true, moved to
+    "Honoraires" and moved back, returns with hasOptionalVat unanswered — and
+    therefore no VAT — until you answer it again.
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    operation = await client.operation(cid, operation_id)
+    breakdown = _find_breakdown(operation, breakdown_id)
+    if not breakdown.get("isCategoryEditable"):
+        raise ValueError(
+            f"breakdown {breakdown_id} is not categorizable (isCategoryEditable=false)"
+        )
+    category = await client.category(cid, category_id)
+    updated = {**breakdown, "categoryId": category_id, "categoryWording": category.get("wording")}
+    operation["breakdowns"] = _replace_breakdown(operation, updated)
+    return _operation_summary(await client.update_operation(cid, operation, updated))
+
+
+@mcp.tool()
+async def set_breakdown_association(
+    operation_id: int,
+    breakdown_id: int,
+    association: str,
+    value: str | int | float | bool | None,
+    slot: str | None = None,
+    company_id: int | None = None,
+) -> dict[str, Any]:
+    """Answer one of a breakdown's questions (association slot).
+
+    Use list_breakdown_questions to find the `association` / `slot`, and
+    list_question_options for the accepted values. Pass value=None to clear an
+    optional answer. `slot` may be omitted when the association has a single one.
+    """
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    operation = await client.operation(cid, operation_id)
+    breakdown = _find_breakdown(operation, breakdown_id)
+    _, slot_name, slot_def = _find_slot(breakdown, association, slot)
+    if not slot_def.get("isEditable"):
+        raise ValueError(f"question '{association}.{slot_name}' is not editable on this breakdown")
+    association_data = dict(breakdown.get("associationData") or {})
+    association_data[slot_def["key"]] = value
+    updated = {**breakdown, "associationData": association_data}
+    operation["breakdowns"] = _replace_breakdown(operation, updated)
+    return _operation_summary(await client.update_operation(cid, operation, updated))
+
+
+@mcp.tool()
+async def set_breakdown_vat(
+    operation_id: int,
+    breakdown_id: int,
+    vat_amount: float | None = None,
+    automatic_vat: bool = False,
+    subject_to_vat: bool | None = None,
+    exemption_reason: str | None = None,
+    company_id: int | None = None,
+) -> dict[str, Any]:
+    """Adjust the VAT of one breakdown (line) of an operation.
+
+    Dougs derives VAT from the category; this applies the overrides the UI
+    offers. Pass at least one of:
+      - vat_amount: VAT amount in euros forced on that line (manualVatAmount).
+      - automatic_vat: True to drop the manual amount and let Dougs recompute.
+      - subject_to_vat: for categories where VAT is optional, answers "is this
+        expense subject to VAT?" (the hasOptionalVat question).
+      - exemption_reason: why the line carries no VAT, e.g.
+        "exemption:outbound:outsideEuropeanUnion" — call
+        list_question_options(..., association="vatExemptionReason") for the
+        values valid on this line.
+
+    The VAT *rate* is not settable directly: it comes from the category, so
+    switch category with set_breakdown_category to change it. Whichever
+    questions remain unanswered show up under `questions` in the result.
+    """
+    if vat_amount is None and not automatic_vat and subject_to_vat is None and not exemption_reason:
+        raise ValueError(
+            "pass at least one of vat_amount, automatic_vat, subject_to_vat or exemption_reason"
+        )
+    if vat_amount is not None and automatic_vat:
+        raise ValueError("vat_amount and automatic_vat are mutually exclusive")
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    operation = await client.operation(cid, operation_id)
+    breakdown = _find_breakdown(operation, breakdown_id)
+    updated = {**breakdown}
+    if vat_amount is not None or automatic_vat:
+        if not breakdown.get("isVatAmountEditable"):
+            raise ValueError(
+                f"breakdown {breakdown_id} has no editable VAT amount (isVatAmountEditable=false)"
+            )
+        updated["manualVatAmount"] = None if vat_amount is None else round(vat_amount, 2)
+    answers: dict[str, Any] = {}
+    if subject_to_vat is not None:
+        answers["hasOptionalVat"] = subject_to_vat
+    if exemption_reason is not None:
+        answers["vatExemptionReason"] = exemption_reason
+    if answers:
+        association_data = dict(breakdown.get("associationData") or {})
+        for association, answer in answers.items():
+            _find_slot(breakdown, association, None)  # raises if the line does not ask for it
+            association_data[association] = answer
+        updated["associationData"] = association_data
+    operation["breakdowns"] = _replace_breakdown(operation, updated)
+    return _operation_summary(await client.update_operation(cid, operation, updated))
+
+
+@mcp.tool()
+async def split_operation(
+    operation_id: int,
+    lines: list[dict[str, Any]],
+    company_id: int | None = None,
+) -> dict[str, Any]:
+    """Split an operation into several accounting lines (breakdowns).
+
+    `lines` replaces every non-counterpart breakdown of the operation. Each line
+    is an object:
+      - amount (required): positive amount in euros, VAT included.
+      - category_id (optional): see list_available_categories; omitted leaves
+        the line uncategorized.
+      - breakdown_id (optional): id of an existing line to update in place —
+        keeps its answers (associations) and VAT overrides. Omit it to create a
+        new line; any existing line left out is deleted.
+      - wording (optional): free-text label for the line.
+      - is_inbound (optional): defaults to the operation's direction; set the
+        opposite for a line going the other way (e.g. a partial refund).
+
+    Amounts must add up to the operation's total, otherwise it comes back with
+    isTotalAmountValid=false. The counterpart (bank) line is kept and recomputed
+    by Dougs.
+    """
+    if not lines:
+        raise ValueError("lines must contain at least one line")
+    client = _get_client()
+    cid = await client.resolve_company_id(company_id)
+    operation = await client.operation(cid, operation_id)
+    if len(lines) > 1 and not operation.get("allowAddingBreakdown"):
+        raise ValueError(f"operation {operation_id} does not accept several breakdowns")
+
+    kept = [b for b in operation["breakdowns"] if b.get("isCounterpart") or b.get("isFee")]
+    template = next(
+        (b for b in operation["breakdowns"] if not b.get("isCounterpart") and not b.get("isFee")),
+        None,
+    )
+    section = (template or {}).get("section") or "main"
+
+    new_breakdowns: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        if line.get("amount") is None:
+            raise ValueError(f"lines[{index}] is missing 'amount'")
+        existing = (
+            _find_breakdown(operation, int(line["breakdown_id"]))
+            if line.get("breakdown_id") is not None
+            else None
+        )
+        breakdown: dict[str, Any] = dict(existing) if existing else {"section": section}
+        breakdown["amount"] = abs(float(line["amount"]))
+        breakdown["isInbound"] = bool(line.get("is_inbound", operation.get("isInbound")))
+        if line.get("wording") is not None:
+            breakdown["wording"] = line["wording"]
+        if line.get("category_id") is not None:
+            category = await client.category(cid, int(line["category_id"]))
+            breakdown["categoryId"] = int(line["category_id"])
+            breakdown["categoryWording"] = category.get("wording")
+        elif not existing:
+            breakdown["categoryWording"] = "Non catégorisé"
+        new_breakdowns.append(breakdown)
+
+    operation["breakdowns"] = new_breakdowns + kept
+    return _operation_summary(await client.update_operation(cid, operation, new_breakdowns[-1]))
 
 
 def _read_upload(file_path: str) -> tuple[str, bytes, str]:

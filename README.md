@@ -70,6 +70,30 @@ DOUGS_PASSWORD=your-password
 | `get_file_url` | Resolve a Dougs file path (`/files/…`) to a downloadable signed S3 URL |
 | `raw_get` | Low-level read-only GET on any API path (for unwrapped endpoints) |
 
+### Editing an operation
+
+Dougs models an operation as a set of **breakdowns** (accounting lines): the
+categorized line(s) plus a non-editable counterpart (the bank side). VAT is
+derived from the category, and a category may need extra input before the line
+is complete — Dougs asks these as **questions** (association slots): the VAT
+exemption reason of a 0% line, the supplier, the loan, the partner and period of
+a remuneration…
+
+A typical pass:
+
+1. `get_operation` — read the lines, their ids and their pending questions.
+2. `list_available_categories` — pick a valid `category_id` for a line
+   (`search_categories` browses the full catalog when no line is at hand).
+3. `set_breakdown_category` — assign it; the result shows the recomputed VAT and
+   any question the new category raised.
+4. `list_question_options` then `set_breakdown_vat` / `set_breakdown_association`
+   — answer them.
+5. `validate_operation` — confirm the categorization.
+
+Use `split_operation` when one transaction covers several categories: it
+replaces the operation's lines with the ones you pass (amounts must add up to
+the operation total).
+
 `get_accounting_stat` `stat_type` values: `chiffre-d-affaires`, `compte-de-resultat`,
 `resultat-d-exploitation`, `charges-d-exploitation`, `repartition-des-charges`,
 `tresorerie-compte-treso`, `flux-de-tresorerie-compte-treso`, `suivi-tva`,
@@ -82,6 +106,10 @@ These **modify** your accounting data:
 
 | Tool | Description |
 |------|-------------|
+| `set_breakdown_category` | Re-categorize one line of an operation |
+| `set_breakdown_vat` | Adjust a line's VAT: manual amount, back to automatic, "subject to VAT?" answer, or the exemption reason for a 0% line |
+| `set_breakdown_association` | Answer any other question on a line (supplier, loan, partner, period…) |
+| `split_operation` | Split an operation into several lines (amount + category each), or merge them back |
 | `validate_operation` | Validate / un-validate an operation (confirms its categorization; `validated=False` re-opens it) |
 | `add_attachment` | Attach a local file (PDF/image receipt or invoice) to an operation |
 | `remove_attachment` | Remove an attachment from an operation (by `attachment_id`) |

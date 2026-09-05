@@ -236,6 +236,23 @@ class DougsClient:
         """Fetch a single operation with its breakdowns."""
         return await self.get(f"/companies/{company_id}/operations/{operation_id}")
 
+    async def update_operation(
+        self,
+        company_id: int,
+        operation: dict[str, Any],
+        updated_breakdown: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist a mutated operation.
+
+        The API expects the whole operation back, plus the breakdown that
+        changed under `updatedBreakdown` so the backend can recompute the
+        derived fields (VAT, counterpart, resolved category) for that line.
+        """
+        payload = {**operation, "updatedBreakdown": updated_breakdown}
+        return await self.post(
+            f"/companies/{company_id}/operations/{operation['id']}", json=payload
+        )
+
     async def resolve_file_url(self, path: str) -> str:
         """Resolve a Dougs file path (e.g. '/files/...') to its direct S3 URL.
 
