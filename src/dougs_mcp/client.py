@@ -50,7 +50,8 @@ class DougsClient:
         # Bumped on each successful login; lets concurrent 401s coalesce into one re-login.
         self._auth_gen = 0
         self._login_lock = asyncio.Lock()
-        self._categories: dict[int, dict[str, Any]] = {}
+        self._catalogs: dict[int, dict[int, dict[str, Any]]] = {}
+        self._catalog_lock = asyncio.Lock()
 
     async def login(self) -> None:
         try:
@@ -144,13 +145,31 @@ class DougsClient:
         year = await self.get(f"/companies/{company_id}/accounting-years/active")
         return int(year["id"])
 
+    async def category_catalog(self, company_id: int) -> dict[int, dict[str, Any]]:
+        """Full category catalog keyed by id, fetched once per company and cached.
+
+        Includes the hidden resolved variants (e.g. "... (Avec TVA)") that
+        breakdowns point to through resolvedCategoryId.
+        """
+        cached = self._catalogs.get(company_id)
+        if cached is not None:
+            return cached
+        async with self._catalog_lock:
+            if company_id not in self._catalogs:
+                cats = await self.get(
+                    f"/companies/{company_id}/categories", params={"full": "true"}
+                )
+                self._catalogs[company_id] = {c["id"]: c for c in cats}
+        return self._catalogs[company_id]
+
     async def category(self, company_id: int, category_id: int) -> dict[str, Any]:
-        """Resolve an accounting category by id (cached; the catalog is stable)."""
-        cached = self._categories.get(category_id)
+        """Resolve an accounting category by id, from the cached catalog."""
+        catalog = await self.category_catalog(company_id)
+        cached = catalog.get(category_id)
         if cached is not None:
             return cached
         data = await self.get(f"/companies/{company_id}/categories/{category_id}")
-        self._categories[category_id] = data
+        catalog[category_id] = data
         return data
 
     async def resolve_file_url(self, path: str) -> str:
