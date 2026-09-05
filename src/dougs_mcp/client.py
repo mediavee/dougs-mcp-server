@@ -72,6 +72,8 @@ class DougsClient:
         self._login_lock = asyncio.Lock()
         self._catalogs: dict[int, dict[int, dict[str, Any]]] = {}
         self._catalog_lock = asyncio.Lock()
+        self._metrics: dict[int, dict[str, dict[str, Any]]] = {}
+        self._metrics_lock = asyncio.Lock()
         self._session_path = _session_path(settings.dougs_email)
         self._load_session()
 
@@ -231,6 +233,23 @@ class DougsClient:
         data = await self.get(f"/companies/{company_id}/categories/{category_id}")
         catalog[category_id] = data
         return data
+
+    async def metric_catalog(self, company_id: int) -> dict[str, dict[str, Any]]:
+        """Time-series catalog keyed by series name, fetched once and cached.
+
+        Series ids are uuids; callers address them by their stable name
+        (e.g. "accounting.chiffre-d-affaires").
+        """
+        cached = self._metrics.get(company_id)
+        if cached is not None:
+            return cached
+        async with self._metrics_lock:
+            if company_id not in self._metrics:
+                series = await self.get(
+                    f"/companies/{company_id}/stats/series", params={"namespace": "accounting"}
+                )
+                self._metrics[company_id] = {x["name"]: x for x in series}
+        return self._metrics[company_id]
 
     async def operation(self, company_id: int, operation_id: int) -> dict[str, Any]:
         """Fetch a single operation with its breakdowns."""

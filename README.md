@@ -60,6 +60,11 @@ DOUGS_PASSWORD=your-password
 | `list_sales_channels` | Configured sales channels |
 | `get_active_accounting_year` | Current fiscal year (id, opening/closing dates) |
 | `list_accounting_years` | All fiscal years |
+| `list_metrics` | The company's accounting time series (105 on a typical account): revenue, expenses, income-statement lines, cash per bank account |
+| `get_metrics` | Values of one or more series — monthly/quarterly/yearly, per-period or cumulative, over the full history |
+| `list_investments` | Fixed assets and their depreciation, plus portfolio totals |
+| `list_loans` | Loans: amount, start date, duration, rate |
+| `list_declarations` | Tax filings (VAT, corporate tax, CFE): period, amount due, confirmation |
 | `get_accounting_stat` | Aggregated stat for a fiscal year: revenue, income statement, operating result, charges, cash, VAT tracking, corporate tax, remunerations… (see `stat_type`) |
 | `list_sales_invoices` | Customer invoices (client, amount, VAT, due date, status) |
 | `list_vendor_invoices` | Supplier invoices |
@@ -94,11 +99,32 @@ Use `split_operation` when one transaction covers several categories: it
 replaces the operation's lines with the ones you pass (amounts must add up to
 the operation total).
 
+### Financial analysis
+
+`get_accounting_stat` returns **year-scoped** aggregates (income statement, VAT
+tracking, corporate tax…). For anything spanning several years, use the time
+series instead:
+
+```
+list_metrics(search="chiffre")      -> accounting.chiffre-d-affaires, …
+get_metrics(["accounting.chiffre-d-affaires",
+             "accounting.charges-d-exploitation"], group="year")
+```
+
+Series go back to the company's first year, in `month` / `quarter` / `year`
+granularity, per-period or `cumulative`. Dougs pads them with zero-valued future
+periods; those are dropped unless `include_future=True`, and a period still in
+progress is flagged `partial`. Alongside the aggregates, `list_investments`,
+`list_loans` and `list_declarations` cover assets, debt and tax burden.
+
 `get_accounting_stat` `stat_type` values: `chiffre-d-affaires`, `compte-de-resultat`,
 `resultat-d-exploitation`, `charges-d-exploitation`, `repartition-des-charges`,
-`tresorerie-compte-treso`, `flux-de-tresorerie-compte-treso`, `suivi-tva`,
-`suivi-impots-societes`, `suivi-cfe`, `remunerations`, `remunerations-for-accounting-year`,
-`tns-social-charges`, `fonds-propres`, `comptes-d-associes`, `autres-reserves-reports-a-nouveau`.
+`tresorerie`, `tresorerie-compte-treso`, `flux-de-tresorerie`,
+`flux-de-tresorerie-compte-treso`, `suivi-tva`, `suivi-impots-societes`, `suivi-cfe`,
+`remunerations`, `remunerations-for-accounting-year`, `tns-social-charges`,
+`social-charges`, `indemnite-kilometrique`, `compte-de-l-exploitant`,
+`compte-de-debours`, `comptes-de-filiale`, `fonds-propres`, `comptes-d-associes`,
+`autres-reserves-reports-a-nouveau`.
 
 ### Write tools
 
