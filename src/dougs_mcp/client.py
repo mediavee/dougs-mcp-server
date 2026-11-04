@@ -78,6 +78,10 @@ class DougsClient:
         self._session_path = _session_path(settings.dougs_email)
         self._load_session()
 
+    @property
+    def base_url(self) -> str:
+        return self._s.dougs_base_url.rstrip("/")
+
     def _load_session(self) -> None:
         try:
             cookies = json.loads(self._session_path.read_text())

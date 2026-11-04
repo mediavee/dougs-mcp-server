@@ -136,6 +136,24 @@ progress is flagged `partial`. Alongside the aggregates, `list_investments`,
 `compte-de-debours`, `comptes-de-filiale`, `fonds-propres`, `comptes-d-associes`,
 `autres-reserves-reports-a-nouveau`.
 
+### Sales invoice drafts
+
+Prepare customer invoices without ever issuing them. Drafts live under
+`/companies/{id}/sales-invoices-drafts`, a resource separate from finalized
+invoices: a draft has no invoice number and is not an accounting entry. No tool
+finalizes or sends an invoice; review the draft and finalize it in the Dougs
+app (each tool returns its `url`).
+
+| Tool | Description |
+|------|-------------|
+| `list_customers` | Registered customers an invoice can be addressed to (id, name, SIREN, B2B) |
+| `list_sales_invoice_drafts` | Drafts with client, lines and totals |
+| `get_sales_invoice_draft` | One draft: client, dates, lines, totals computed by Dougs |
+
+The draft tools that write are listed below. `due_in_days` maps to the payment
+terms Dougs offers (0 = immediate, 15, 30, 60 days); any other delay is stored
+as a custom due date.
+
 ### Write tools
 
 These **modify** your accounting data:
@@ -149,6 +167,9 @@ These **modify** your accounting data:
 | `validate_operation` | Validate / un-validate an operation (confirms its categorization; `validated=False` re-opens it) |
 | `add_attachment` | Attach a local file (PDF/image receipt or invoice) to an operation |
 | `remove_attachment` | Remove an attachment from an operation (by `attachment_id`) |
+| `create_sales_invoice_draft` | Create a sales invoice **draft** for a customer (id, SIREN or name) from lines: title, quantity, unit price, VAT rate, optional unit/description |
+| `update_sales_invoice_draft` | Change a draft's lines, date, due date or subject (only the arguments passed) |
+| `delete_sales_invoice_draft` | Delete a draft (finalized invoices are out of reach) |
 
 ## Use with Claude Code
 
