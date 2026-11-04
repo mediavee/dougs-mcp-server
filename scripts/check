@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# The repo's gate, run as-is locally and in CI.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+uv lock --check
+uv sync --locked --quiet
+uv run ruff check src
+uv run ruff format --check src
+uv run mypy src
+# Boots the server in memory: catches a dependency bump that breaks tool registration.
+uv run python - <<'PY'
+import asyncio
+
+from fastmcp import Client
+
+from dougs_mcp import mcp
+
+
+async def main() -> None:
+    async with Client(mcp) as client:
+        tools = await client.list_tools()
+    assert len(tools) >= 40, f"only {len(tools)} tools registered"
+    print(f"server ok: {len(tools)} tools")
+
+
+asyncio.run(main())
+PY
