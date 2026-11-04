@@ -226,6 +226,14 @@ class DougsClient:
         """Authenticated POST (JSON or multipart) returning parsed JSON if any."""
         return self._json_or_none(await self._send("POST", path, json=json, files=files, data=data))
 
+    async def put(self, path: str, json: Any = None) -> Any:
+        """Authenticated PUT returning parsed JSON if any."""
+        return self._json_or_none(await self._send("PUT", path, json=json))
+
+    async def patch(self, path: str, json: Any = None) -> Any:
+        """Authenticated PATCH returning parsed JSON if any."""
+        return self._json_or_none(await self._send("PATCH", path, json=json))
+
     async def delete(self, path: str) -> Any:
         """Authenticated DELETE returning parsed JSON if any."""
         return self._json_or_none(await self._send("DELETE", path))
