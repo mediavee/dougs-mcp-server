@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from pydantic import BaseModel, Field
 
 from .client import DougsClient
-from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
+from .server import DESTRUCTIVE, READ, SENDS, WRITE, compact, get_client, mcp
 
 OperationId = Annotated[int, Field(description="Operation id, from list_operations.")]
 BreakdownId = Annotated[
@@ -229,6 +229,29 @@ async def validate_operation(
     operation = await client.operation(cid, operation_id)
     operation["validated"] = validated
     return _operation_view(await client.update_operation(cid, operation))
+
+
+@mcp.tool(annotations=SENDS)
+async def request_categorization_help(
+    operation_id: OperationId,
+    message: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="What the operation is, for the accountant, e.g. 'Achat de matériel "
+            "photo pour un client'.",
+        ),
+    ],
+) -> dict[str, Any]:
+    """Ask the Dougs accountant to categorize an operation; they answer in the app. Returns the
+    operation as get_operation does."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    op = await client.post(
+        f"/companies/{cid}/operations/{operation_id}/actions/request-categorization-help",
+        json={"context": message},
+    )
+    return _operation_view(op)
 
 
 def _find_breakdown(operation: dict[str, Any], breakdown_id: int) -> dict[str, Any]:
@@ -542,6 +565,61 @@ async def create_operation(
     return _operation_view(created)
 
 
+@mcp.tool(annotations=WRITE)
+async def create_mileage_allowance(
+    date: Annotated[str, Field(description="Trip date 'YYYY-MM-DD', not in the future.")],
+    kilometers: Annotated[
+        int, Field(gt=0, description="Distance driven, round trip included, e.g. 42.")
+    ],
+    memo: Annotated[
+        str | None, Field(description="Purpose of the trip, e.g. 'Rendez-vous client Lyon'.")
+    ] = None,
+    car_id: Annotated[
+        int | None,
+        Field(description="Personal vehicle; defaults to the only one when there is one."),
+    ] = None,
+) -> dict[str, Any]:
+    """Record a mileage allowance (indemnité kilométrique) for a business trip in a personal
+    vehicle; Dougs computes the amount from the official scale. Delete it with
+    delete_operation."""
+    _iso_to_fr(date)  # validates the format
+    client = get_client()
+    cid = await client.resolve_company_id()
+    cars = [
+        c
+        for c in await client.get(f"/companies/{cid}/cars", params={"type": "personal"})
+        if not c.get("endDate") or c["endDate"][:10] >= date
+    ]
+    options = [{"id": c.get("id"), "name": c.get("name")} for c in cars]
+    if not cars:
+        raise ValueError(
+            "no personal vehicle is registered for that date: add it in the Dougs app first"
+        )
+    if car_id is None:
+        if len(cars) != 1:
+            raise ValueError(f"pass car_id, one of {options}")
+        car_id = cars[0]["id"]
+    elif car_id not in {c.get("id") for c in cars}:
+        raise ValueError(f"car {car_id} is not an active personal vehicle; use one of {options}")
+    created = await client.post(
+        f"/companies/{cid}/operations",
+        json={
+            "type": "kilometricIndemnity",
+            "date": f"{date}T00:00:00.000Z",
+            "memo": memo,
+            "metadata": {"kilometricIndemnity": {"isRoundTrip": False}},
+            "breakdowns": [
+                {
+                    "amount": 0,
+                    "categoryId": -1,
+                    "associationData": {"kilometers": kilometers, "carId": car_id},
+                }
+            ],
+        },
+    )
+    return _operation_view(created)
+
+
 @mcp.tool(annotations=DESTRUCTIVE)
 async def delete_operation(operation_id: OperationId) -> dict[str, Any]:
     """Delete an expense report, cash receipt or mileage allowance for good. Bank transactions
@@ -761,6 +839,33 @@ async def set_breakdown_association(
     updated = {**breakdown, "associationData": association_data}
     operation["breakdowns"] = _replace_breakdown(operation, updated)
     return _operation_view(await client.update_operation(cid, operation, updated))
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def apply_to_similar_operations(
+    operation_id: OperationId,
+    what: Annotated[
+        Literal["category", "answers"],
+        Field(
+            description="'category': the categories of its lines; 'answers': its answers to "
+            "Dougs' questions (supplier, partner…)."
+        ),
+    ],
+) -> dict[str, Any]:
+    """Copy an operation's categorization onto the operations Dougs finds similar, as the app
+    does after a change; returns the operations it changed."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    action = (
+        "autocategorize-matching-operations"
+        if what == "category"
+        else "auto-associate-matching-operations"
+    )
+    changed, accounts = await asyncio.gather(
+        client.get(f"/companies/{cid}/operations/{operation_id}/actions/{action}"),
+        _account_labels(client, cid),
+    )
+    return {"changed": [_operation_row(op, accounts) for op in changed or []]}
 
 
 @mcp.tool(annotations=WRITE)
