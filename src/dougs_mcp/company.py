@@ -5,7 +5,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from .server import READ, compact, get_client, mcp
+from .server import READ, WRITE, compact, get_client, mcp
 
 APP_URL = "https://app.dougs.fr"
 
@@ -65,8 +65,8 @@ async def get_account() -> dict[str, Any]:
     )
 
 
-# Changes which company the session acts on, not any data.
-@mcp.tool(annotations=READ)
+# WRITE: it changes no data but retargets every later write.
+@mcp.tool(annotations=WRITE)
 async def select_company(
     company_id: Annotated[int, Field(description="A company id from get_account.")],
 ) -> dict[str, Any]:

@@ -15,7 +15,7 @@ Limit = Annotated[int, Field(ge=1, le=100, description="Rows per page.")]
 Offset = Annotated[int, Field(ge=0, description="Rows to skip, for the next page.")]
 Search = Annotated[str, Field(description="Free-text search, e.g. a client name.")]
 CUSTOMER_HELP = "Customer id, SIREN or name (list_customers), or any French company's SIREN."
-IsoDate = Annotated[str, Field(description="ISO date 'YYYY-MM-DD'; default: today.")]
+IsoDate = Annotated[str, Field(description="ISO date 'YYYY-MM-DD'; today on creation.")]
 Subject = Annotated[str, Field(description="Subject printed on the document.")]
 
 
@@ -778,7 +778,9 @@ async def save_invoice_product(
         }
         return _product_row(await client.post(f"/companies/{cid}/invoice-products", json=payload))
     # The API has no single-product GET: find it in the list.
-    products = await client.get(f"/companies/{cid}/invoice-products", params={"search": ""})
+    products = await client.get(
+        f"/companies/{cid}/invoice-products", params={"search": "", "limit": 1000}
+    )
     current = next((p for p in products or [] if p.get("id") == str(product_id)), None)
     if current is None:
         raise ValueError(f"no product {product_id}; see list_invoice_products")

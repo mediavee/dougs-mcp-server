@@ -15,8 +15,9 @@ An agent pays for every tool twice: its definition sits in the context of every 
 answers fill the context of every call. Design for both.
 
 - **Names**: `verb_noun` in snake_case (`list_vendor_invoices`, `get_operation`,
-  `set_breakdown_vat`). One tool per task a person would name. Creating and changing a record is
-  one `save_*` tool: without an id it creates, with one it changes only the arguments passed. Merge tools an agent would always
+  `set_breakdown_vat`). One tool per task a person would name. When creating and changing a record
+  take the same fields, they are one `save_*` tool: without an id it creates, with one it
+  changes only the arguments passed. Merge tools an agent would always
   call together; split a tool whose arguments switch between unrelated jobs.
 - **Description**: one to three sentences: what it returns or changes, and when to pick it over a
   sibling. No restatement of the parameters, no history.

@@ -710,7 +710,7 @@ async def list_question_options(
     )
 
 
-@mcp.tool(annotations=WRITE)
+@mcp.tool(annotations=DESTRUCTIVE)
 async def set_breakdown_category(
     operation_id: OperationId,
     breakdown_id: BreakdownId,
@@ -834,7 +834,7 @@ class SplitLine(BaseModel):
     )
 
 
-@mcp.tool(annotations=WRITE)
+@mcp.tool(annotations=DESTRUCTIVE)
 async def split_operation(
     operation_id: OperationId,
     lines: Annotated[
@@ -858,6 +858,12 @@ async def split_operation(
     template = next(iter(_main_lines(operation)), None)
     section = (template or {}).get("section") or "main"
 
+    main_ids = {b["id"] for b in _main_lines(operation)}
+    given = [line.breakdown_id for line in lines if line.breakdown_id is not None]
+    if len(given) != len(set(given)) or not set(given) <= main_ids:
+        raise ValueError(
+            f"breakdown_id must name distinct categorizable lines; they are {sorted(main_ids)}"
+        )
     new_breakdowns: list[dict[str, Any]] = []
     for line in lines:
         existing = (

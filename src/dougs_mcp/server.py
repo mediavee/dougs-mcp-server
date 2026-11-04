@@ -62,8 +62,8 @@ def _lean_schema(schema: Any) -> Any:
 class LeanTools(Transform):
     """Serve every tool with a lean input schema and no output schema.
 
-    The definitions sit in the agent's context for the whole session; the output schemas
-    are generic objects that add nothing but a duplicate structured copy of each answer.
+    The definitions sit in the agent's context for the whole session, and the output schemas
+    pydantic derives from `dict[str, Any]` returns describe nothing.
     """
 
     @staticmethod
