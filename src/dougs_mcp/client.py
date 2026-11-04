@@ -77,6 +77,7 @@ class DougsClient:
         self._metrics: dict[int, dict[str, dict[str, Any]]] = {}
         self._metrics_lock = asyncio.Lock()
         self._default_company_id: int | None = None
+        self._selected_company_id: int | None = None
         self._session_path = _session_path(settings.dougs_email)
         self._load_session()
 
@@ -238,10 +239,14 @@ class DougsClient:
         """Authenticated DELETE returning parsed JSON if any."""
         return self._json_or_none(await self._send("DELETE", path))
 
-    async def resolve_company_id(self, override: int | None = None) -> int:
-        """Pick the company id: explicit arg > configured > user's preferred > first."""
-        if override is not None:
-            return override
+    def select_company(self, company_id: int) -> None:
+        """Make company_id the company every later call acts on."""
+        self._selected_company_id = company_id
+
+    async def resolve_company_id(self) -> int:
+        """Pick the company id: selected > configured > user's preferred > first."""
+        if self._selected_company_id is not None:
+            return self._selected_company_id
         if self._s.dougs_company_id is not None:
             return self._s.dougs_company_id
         if self._default_company_id is None:

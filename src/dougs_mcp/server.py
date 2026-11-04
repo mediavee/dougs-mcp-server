@@ -1,8 +1,12 @@
 """FastMCP server instance and the plumbing shared by the tool modules."""
 
+from collections.abc import Sequence
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from fastmcp.server.transforms import GetToolNext, Transform
+from fastmcp.tools import Tool
+from fastmcp.utilities.versions import VersionSpec
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -16,10 +20,6 @@ READ = ToolAnnotations(read_only_hint=True, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
 DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True)
 
-CompanyId = Annotated[
-    int | None, Field(description="Company id; defaults to the account's preferred company.")
-]
-
 
 def compact(value: Any) -> Any:
     """Drop None, empty strings and empty containers recursively: they cost tokens and say nothing."""
@@ -31,6 +31,59 @@ def compact(value: Any) -> Any:
     return value
 
 
+def _lean_schema(schema: Any) -> Any:
+    """Shorten a pydantic JSON schema without changing what it accepts in practice.
+
+    An optional argument becomes its plain type (`anyOf [T, null]` with a null default),
+    and `title` keys, which repeat the property names, go.
+    """
+    if isinstance(schema, list):
+        return [_lean_schema(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    # A string `title` is an annotation; a dict one is a property named "title".
+    schema = {
+        k: _lean_schema(v) for k, v in schema.items() if not (k == "title" and isinstance(v, str))
+    }
+    variants = schema.get("anyOf")
+    if (
+        isinstance(variants, list)
+        and {"type": "null"} in variants
+        and "default" in schema
+        and schema["default"] is None
+    ):
+        rest = [v for v in variants if v != {"type": "null"}]
+        if len(rest) == 1:
+            extra = {k: v for k, v in schema.items() if k not in ("anyOf", "default")}
+            return {**rest[0], **extra}
+    return schema
+
+
+class LeanTools(Transform):
+    """Serve every tool with a lean input schema and no output schema.
+
+    The definitions sit in the agent's context for the whole session, and the output schemas
+    pydantic derives from `dict[str, Any]` returns describe nothing.
+    """
+
+    @staticmethod
+    def _lean(tool: Tool) -> Tool:
+        return tool.model_copy(
+            update={"parameters": _lean_schema(tool.parameters), "output_schema": None}
+        )
+
+    async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
+        return [self._lean(t) for t in tools]
+
+    async def get_tool(
+        self, name: str, call_next: GetToolNext, *, version: VersionSpec | None = None
+    ) -> Tool | None:
+        tool = await call_next(name, version=version)
+        return self._lean(tool) if tool else None
+
+
+mcp.add_transform(LeanTools())
+
 _client: DougsClient | None = None
 
 
@@ -41,25 +94,25 @@ def get_client() -> DougsClient:
     return _client
 
 
-@mcp.tool()
-async def get_file_url(path: str) -> dict[str, str]:
-    """Resolve a Dougs file path to a directly-downloadable URL.
+@mcp.tool(annotations=READ)
+async def get_file_url(
+    path: Annotated[
+        str,
+        Field(description="A Dougs file path ('/files/...') taken from another tool's answer."),
+    ],
+) -> dict[str, str]:
+    """Turn a Dougs file path into a signed download URL (public, short-lived)."""
+    return {"url": await get_client().resolve_file_url(path)}
 
-    Pass a path like '/files/...' taken from an operation's
-    sourceDocumentAttachments[].sourceDocument.file.url, or a sales/vendor
-    invoice filePath. Returns the signed S3 URL (publicly downloadable, expires).
-    """
-    url = await get_client().resolve_file_url(path)
-    return {"url": url}
 
-
-@mcp.tool()
-async def raw_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    """Low-level authenticated GET on the Dougs API (read-only).
-
-    Use for endpoints not yet wrapped, e.g. '/companies/12345/invoices'.
-    Path is relative to the API base URL.
-    """
+@mcp.tool(annotations=READ)
+async def raw_get(
+    path: Annotated[
+        str, Field(description="API path, e.g. '/companies/12345/vat-configurations'.")
+    ],
+    params: Annotated[dict[str, Any] | None, Field(description="Query parameters.")] = None,
+) -> Any:
+    """Authenticated GET on any Dougs API path, raw JSON back: for what no tool covers yet."""
     if not path.startswith("/"):
         path = "/" + path
     return await get_client().get(path, params=params)
