@@ -197,6 +197,5 @@ In `claude_desktop_config.json`:
 ## Development
 
 ```bash
-uv run ruff check src
-uv run mypy src
+./scripts/check   # lockfile, ruff, mypy, and a boot of the server; CI runs the same
 ```

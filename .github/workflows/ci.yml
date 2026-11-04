@@ -5,22 +5,34 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  lint:
+  gate:
+    # GitHub-hosted on purpose: this repo is public, and the org's self-hosted runner
+    # groups (vars.CI_RUNNER) do not accept public repositories.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.11.20"
-      - name: Verify lockfile is up to date
-        run: uv lock --check
-      - name: Sync (frozen)
-        run: uv sync --frozen
-      - name: Ruff lint
-        run: uv run ruff check src
-      - name: Ruff format check
-        run: uv run ruff format --check src
-      - name: Mypy
-        run: uv run mypy src
+          version: "0.13.7"
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+      - run: ./scripts/check
+
+  # The only required check: branch rules name it, so jobs can change freely.
+  ci-ok:
+    if: ${{ !cancelled() }}
+    needs: [gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          GATE: ${{ needs.gate.result }}
+        run: '[ "$GATE" = success ]'
