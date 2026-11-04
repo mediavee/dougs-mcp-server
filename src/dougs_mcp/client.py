@@ -41,6 +41,14 @@ def _session_path(email: str) -> Path:
 class DougsError(Exception):
     """Generic API error surfaced to the caller."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class DougsJobError(DougsError):
+    """A background job Dougs handled reported a failure."""
+
 
 class DougsAuthError(DougsError):
     """Login failed (bad credentials, 2FA required, or Cloudflare block)."""
@@ -205,7 +213,9 @@ class DougsClient:
         elif "set-cookie" in resp.headers:  # rolling session: keep the fresh cookie
             self._save_session()
         if resp.status_code >= 400:
-            raise DougsError(f"{method} {path} -> {resp.status_code}: {_error_detail(resp)}")
+            raise DougsError(
+                f"{method} {path} -> {resp.status_code}: {_error_detail(resp)}", resp.status_code
+            )
         return resp
 
     @staticmethod
@@ -238,6 +248,30 @@ class DougsClient:
     async def delete(self, path: str) -> Any:
         """Authenticated DELETE returning parsed JSON if any."""
         return self._json_or_none(await self._send("DELETE", path))
+
+    async def wait_job(self, job: dict[str, Any], max_wait: float = 60) -> dict[str, Any] | None:
+        """Poll a background job ({"uuid": ...}) until Dougs has handled it; return its metadata.
+
+        Returns None when it is still running after `max_wait` seconds; raises DougsError with the
+        job's user message (DougsJobError) when it failed.
+        """
+        deadline = asyncio.get_running_loop().time() + max_wait
+        while True:
+            state = await self.get(f"/jobs/{job['uuid']}")
+            if state.get("handledAt"):
+                metadata: dict[str, Any] = state.get("metadata") or {}
+                error = metadata.get("error")
+                if isinstance(metadata.get("result"), dict) and (
+                    metadata["result"].get("__type") == "jobClientError"
+                ):
+                    error = metadata["result"]
+                if error:
+                    message = error.get("userMessage") if isinstance(error, dict) else None
+                    raise DougsJobError(f"job {job['uuid']} failed: {message or error}")
+                return metadata
+            if asyncio.get_running_loop().time() > deadline:
+                return None
+            await asyncio.sleep(1)
 
     def select_company(self, company_id: int) -> None:
         """Make company_id the company every later call acts on."""

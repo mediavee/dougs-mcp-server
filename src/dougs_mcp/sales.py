@@ -8,8 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from .client import DougsClient
-from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
+from .client import DougsClient, DougsError
+from .server import DESTRUCTIVE, READ, SENDS, WRITE, compact, get_client, mcp
 
 Limit = Annotated[int, Field(ge=1, le=100, description="Rows per page.")]
 Offset = Annotated[int, Field(ge=0, description="Rows to skip, for the next page.")]
@@ -42,27 +42,8 @@ def _client_label(data: dict[str, Any]) -> str | None:
 # --- Invoices --------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READ)
-async def list_sales_invoices(
-    payment_status: Annotated[
-        Literal["waiting", "paid", "canceled"] | None,
-        Field(description="Keep only invoices with this payment status."),
-    ] = None,
-    search: Search = "",
-    limit: Limit = 20,
-    offset: Offset = 0,
-) -> dict[str, Any]:
-    """List finalized sales invoices, newest first: number, client, amounts, payment status and
-    the bank operations they are matched to. Drafts are in list_sales_invoice_drafts."""
-    client = get_client()
-    cid = await client.resolve_company_id()
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if payment_status:
-        params["paymentStatus"] = payment_status
-    if search:
-        params["search"] = search
-    invoices = await client.get(f"/companies/{cid}/sales-invoices", params=params)
-    rows = [
+def _invoice_row(i: dict[str, Any]) -> dict[str, Any]:
+    return compact(
         {
             "id": i.get("id"),
             "number": i.get("reference"),
@@ -82,10 +63,35 @@ async def list_sales_invoices(
             "operationIds": [
                 (a.get("operation") or {}).get("id") for a in i.get("operationAttachments") or []
             ],
+            "suggestedOperationId": (
+                (i.get("operationCandidate") or {}).get("operation") or {}
+            ).get("id"),
         }
-        for i in invoices or []
-    ]
-    return _page([compact(r) for r in rows], limit, offset)
+    )
+
+
+@mcp.tool(annotations=READ)
+async def list_sales_invoices(
+    payment_status: Annotated[
+        Literal["waiting", "paid", "canceled"] | None,
+        Field(description="Keep only invoices with this payment status."),
+    ] = None,
+    search: Search = "",
+    limit: Limit = 20,
+    offset: Offset = 0,
+) -> dict[str, Any]:
+    """List finalized sales invoices, newest first: number, client, amounts, payment status and
+    the bank operations they are matched or suggested to. Drafts are in
+    list_sales_invoice_drafts."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if payment_status:
+        params["paymentStatus"] = payment_status
+    if search:
+        params["search"] = search
+    invoices = await client.get(f"/companies/{cid}/sales-invoices", params=params)
+    return _page([_invoice_row(i) for i in invoices or []], limit, offset)
 
 
 @mcp.tool(annotations=READ)
@@ -365,8 +371,8 @@ async def delete_customer(
 
 # --- Invoice and quote drafts ------------------------------------------------------
 #
-# Drafts are not accounting entries and invoice drafts get no number until finalized, so these
-# tools cannot alter the books. Finalizing, sending and converting stay a human step in the app.
+# Drafts are not accounting entries and invoice drafts get no number until finalized, so editing
+# them cannot alter the books. Finalizing, sending and the quote lifecycle are the actions below.
 
 
 class InvoiceLine(BaseModel):
@@ -438,6 +444,11 @@ def _document(client: DougsClient, cid: int, d: dict[str, Any], kind: str) -> di
         "lines": compact(lines),
         **compact({"totalVatAmount": d.get("totalVatAmount")}),
     }
+
+
+def _problems(problems: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """can-finalize answers [{field, message}]: what Dougs requires before finalizing."""
+    return compact({"finalizeProblems": [p.get("message") for p in problems or []]})
 
 
 def _midnight(d: date) -> str:
@@ -534,11 +545,15 @@ async def list_sales_invoice_drafts(
 
 @mcp.tool(annotations=READ)
 async def get_sales_invoice_draft(draft_id: DraftId) -> dict[str, Any]:
-    """Read a sales invoice draft: client, dates, lines, totals and its app URL."""
+    """Read a sales invoice draft: client, dates, lines, totals, its app URL and what still
+    blocks finalizing it."""
     client = get_client()
     cid = await client.resolve_company_id()
-    draft = await client.get(f"/companies/{cid}/sales-invoices-drafts/{draft_id}")
-    return _document(client, cid, draft, "sales-invoice")
+    path = f"/companies/{cid}/sales-invoices-drafts/{draft_id}"
+    draft, problems = await asyncio.gather(
+        client.get(path), client.get(f"{path}/actions/can-finalize")
+    )
+    return {**_document(client, cid, draft, "sales-invoice"), **_problems(problems)}
 
 
 @mcp.tool(annotations=WRITE)
@@ -555,8 +570,8 @@ async def save_sales_invoice_draft(
     subject: Subject = "",
 ) -> dict[str, Any]:
     """Create a sales invoice draft, or change one (only the arguments passed change; a new date
-    or delay recomputes the due date). Dougs computes the totals. A draft is never finalized
-    nor sent: that stays in the app (returned url)."""
+    or delay recomputes the due date). Dougs computes the totals; finalize it with
+    finalize_sales_document."""
     client = get_client()
     cid = await client.resolve_company_id()
     if draft_id is not None:
@@ -633,11 +648,15 @@ async def list_quotes(
 
 @mcp.tool(annotations=READ)
 async def get_quote_draft(quote_id: QuoteDraftId) -> dict[str, Any]:
-    """Read a quote draft: client, dates, lines, totals and its app URL."""
+    """Read a quote draft: client, dates, lines, totals, its app URL and what still blocks
+    finalizing it."""
     client = get_client()
     cid = await client.resolve_company_id()
-    quote = await client.get(f"/companies/{cid}/invoicing/quote-drafts/{quote_id}")
-    return _document(client, cid, quote, "quote")
+    path = f"/companies/{cid}/invoicing/quote-drafts/{quote_id}"
+    quote, problems = await asyncio.gather(
+        client.get(path), client.get(f"{path}/actions/can-finalize")
+    )
+    return {**_document(client, cid, quote, "quote"), **_problems(problems)}
 
 
 @mcp.tool(annotations=WRITE)
@@ -654,8 +673,8 @@ async def save_quote_draft(
     subject: Subject = "",
 ) -> dict[str, Any]:
     """Create a quote (devis) draft, or change one (only the arguments passed change; a new date
-    or validity recomputes the expiration). Dougs computes the totals. A draft is never
-    finalized nor sent: that stays in the app (returned url)."""
+    or validity recomputes the expiration). Dougs computes the totals; finalize it with
+    finalize_sales_document."""
     client = get_client()
     cid = await client.resolve_company_id()
     if quote_id is not None:
@@ -697,6 +716,277 @@ async def delete_quote_draft(quote_id: QuoteDraftId) -> dict[str, Any]:
     await client.get(path)  # 404s unless this id is an existing draft
     await client.delete(path)
     return {"deleted": str(quote_id)}
+
+
+# --- Invoice and quote actions -----------------------------------------------------
+#
+# Finalizing gives a document its legal number and freezes it; sending emails the client.
+
+Document = Annotated[Literal["invoice", "quote"], Field(description="Sales invoice or quote.")]
+InvoiceId = Annotated[UUID, Field(description="Finalized invoice id from list_sales_invoices.")]
+QuoteId = Annotated[UUID, Field(description="Quote id from list_quotes.")]
+
+
+def _invoice_url(client: DougsClient, cid: int, invoice: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_invoice_row(invoice),
+        "url": f"{client.base_url}/app/c/{cid}/invoicing/sales-invoice/{invoice.get('id')}",
+    }
+
+
+def _quote_url(client: DougsClient, cid: int, quote: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_document_row(quote, "quote"),
+        "url": f"{client.base_url}/app/c/{cid}/invoicing/quote/{quote.get('id')}",
+    }
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def finalize_sales_document(
+    document: Document,
+    draft_id: Annotated[
+        UUID, Field(description="Draft id from list_sales_invoice_drafts or list_quotes.")
+    ],
+) -> dict[str, Any]:
+    """Finalize an invoice or quote draft: Dougs numbers it, issues its PDF and freezes it. Fails
+    with what is missing when the draft is incomplete; send it with send_sales_document."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    if document == "invoice":
+        path = f"/companies/{cid}/sales-invoices-drafts/{draft_id}"
+    else:
+        path = f"/companies/{cid}/invoicing/quote-drafts/{draft_id}"
+    problems = await client.get(f"{path}/actions/can-finalize")
+    if problems:
+        tool = "save_sales_invoice_draft" if document == "invoice" else "save_quote_draft"
+        messages = [p.get("message") for p in problems]
+        raise ValueError(f"the draft is not ready: {messages}; complete it with {tool}")
+    if document == "invoice":
+        finalized = await client.post(f"{path}/actions/finalize", json={}) or {}
+        invoice_id = finalized.get("salesInvoiceId") or finalized.get("id")
+        if not invoice_id:
+            return {"finalized": str(draft_id), "next": "find it with list_sales_invoices"}
+        invoice = await client.get(f"/companies/{cid}/sales-invoices/{invoice_id}")
+        return _invoice_url(client, cid, invoice)
+    await client.put(f"{path}/actions/finalize", json={})
+    quote = await client.get(f"/companies/{cid}/invoicing/quotes/{draft_id}")
+    return _quote_url(client, cid, quote)
+
+
+def _email_message(doc: dict[str, Any], quote: bool, signer: str, company: str) -> str:
+    """The message the app pre-fills."""
+    kind = "devis" if quote else "facture"
+    expiry = ""
+    if quote and doc.get("expirationDate"):
+        day = date.fromisoformat(str(doc["expirationDate"])[:10])
+        expiry = f"\nDate d'expiration : {day.strftime('%d/%m/%Y')}"
+    return (
+        f"Bonjour,\n\nVeuillez trouver ci-joint votre {kind}.\n\n"
+        f"{kind.capitalize()} : {doc.get('reference')}\nMontant : {doc.get('amount')} €{expiry}\n\n"
+        "Je vous remercie pour votre confiance et vous souhaite une excellente journée ! \n\n"
+        f"{signer}\n{company}"
+    )
+
+
+@mcp.tool(annotations=SENDS)
+async def send_sales_document(
+    document: Document,
+    document_id: Annotated[
+        UUID, Field(description="Finalized invoice (list_sales_invoices) or quote (list_quotes).")
+    ],
+    recipient: Annotated[str, Field(description="Email address; default: the client's.")] = "",
+    cc: Annotated[list[str] | None, Field(description="Email addresses in copy.")] = None,
+    copy_to_me: Annotated[bool, Field(description="Also send a copy to the user.")] = False,
+    subject: Annotated[str, Field(description="Default: the app's subject.")] = "",
+    message: Annotated[
+        str, Field(description="Email body; default: the app's text with number and amount.")
+    ] = "",
+) -> dict[str, Any]:
+    """Email a finalized invoice or quote to the client, with its PDF attached."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    quote = document == "quote"
+    path = (
+        f"/companies/{cid}/invoicing/quotes/{document_id}"
+        if quote
+        else f"/companies/{cid}/sales-invoices/{document_id}"
+    )
+    doc = await client.get(path)
+    if quote and doc.get("status") == "DRAFT":
+        raise ValueError("this quote is a draft: finalize it first with finalize_sales_document")
+    if not quote and (
+        doc.get("source") != "dougs" or (doc.get("can") or {}).get("canBeSentByEmail") is False
+    ):
+        raise ValueError("Dougs cannot email this invoice (only invoices made in Dougs)")
+    recipient = recipient or (doc.get("clientData") or {}).get("email") or ""
+    if not recipient:
+        raise ValueError("the client has no email address: pass recipient")
+    if not message:
+        me, company = await asyncio.gather(client.get("/users/me"), client.get(f"/companies/{cid}"))
+        signer = (me.get("profile") or {}).get("fullName") or ""
+        message = _email_message(doc, quote, signer, company.get("legalName") or "")
+    payload = {
+        "recipient": recipient,
+        "copyReceivers": cc or [],
+        "selfCopy": copy_to_me,
+        "subject": subject
+        or ("Vous avez reçu un nouveau devis" if quote else "Vous avez reçu une nouvelle facture"),
+        "message": message,
+    }
+    sent = await client.post(f"{path}/actions/send-email", json=payload)
+    row = _quote_url(client, cid, sent) if quote else _invoice_url(client, cid, sent)
+    return {**row, "sentTo": recipient}
+
+
+@mcp.tool(annotations=WRITE)
+async def duplicate_sales_document(
+    document: Document,
+    document_id: Annotated[
+        UUID, Field(description="Invoice, invoice draft, quote or quote draft to copy.")
+    ],
+) -> dict[str, Any]:
+    """Copy an invoice or quote, finalized or draft, into a new draft."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    base = f"/companies/{cid}"
+    if document == "quote":
+        quote = await client.get(f"{base}/invoicing/quotes/{document_id}")
+        source = "quote-drafts" if quote.get("status") == "DRAFT" else "quotes"
+        copy = await client.post(
+            f"{base}/invoicing/{source}/{document_id}/actions/duplicate", json={}
+        )
+        return _document(client, cid, copy, "quote")
+    try:
+        await client.get(f"{base}/sales-invoices-drafts/{document_id}")
+        source = "sales-invoices-drafts"
+    except DougsError as e:
+        if e.status != 404:
+            raise
+        source = "sales-invoices"
+    copy = await client.post(f"{base}/{source}/{document_id}/actions/duplicate", json={})
+    return _document(client, cid, copy, "sales-invoice")
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def refund_sales_invoice(invoice_id: InvoiceId) -> dict[str, Any]:
+    """Create the credit note (avoir) that cancels a finalized invoice, as a draft with the
+    amounts negated: adjust it with save_sales_invoice_draft, then finalize it."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    credit_note = await client.post(
+        f"/companies/{cid}/sales-invoices/{invoice_id}/actions/refund", json={}
+    )
+    return _document(client, cid, credit_note, "sales-invoice")
+
+
+@mcp.tool(annotations=WRITE)
+async def set_sales_invoice_paid(
+    invoice_id: InvoiceId,
+    paid: Annotated[bool, Field(description="True: paid; False: back to waiting.")],
+    paid_at: Annotated[str, Field(description="ISO date 'YYYY-MM-DD'; default: today.")] = "",
+) -> dict[str, Any]:
+    """Mark a finalized invoice paid or unpaid by hand, when no bank operation settles it."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/sales-invoices/{invoice_id}"
+    invoice = await client.get(path)
+    if not (invoice.get("can") or {}).get("updatePaymentStatus"):
+        raise ValueError("Dougs does not let this invoice's payment status change")
+    paid_day = date.fromisoformat(paid_at) if paid_at else date.today()
+    changes = {
+        "paymentStatus": "paid" if paid else "waiting",
+        "paidAt": _midnight(paid_day) if paid else None,
+    }
+    allowed = invoice.get("allowedUpdateFields") or []
+    if "paymentStatus" not in allowed:
+        raise ValueError("Dougs does not let this invoice's payment status change")
+    updated = await client.post(path, json={k: v for k, v in changes.items() if k in allowed})
+    return _invoice_row(updated)
+
+
+# The API has no call that undoes a rejection.
+@mcp.tool(annotations=DESTRUCTIVE)
+async def review_sales_invoice_match(
+    invoice_id: InvoiceId,
+    action: Annotated[
+        Literal["accept", "reject"],
+        Field(description="accept attaches the suggested operation; reject dismisses it."),
+    ],
+) -> dict[str, Any]:
+    """Accept or reject the bank operation Dougs suggests for a sales invoice
+    (suggestedOperationId in list_sales_invoices)."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/sales-invoices/{invoice_id}"
+    invoice = await client.get(path)
+    if not invoice.get("operationCandidate"):
+        raise ValueError("Dougs suggests no operation for this invoice")
+    updated = await client.post(f"{path}/actions/{action}-matched-operation", json={})
+    return _invoice_row(updated or await client.get(path))
+
+
+@mcp.tool(annotations=SENDS)
+async def refuse_sales_invoice(
+    invoice_id: InvoiceId,
+    reason_code: Annotated[
+        str, Field(description="Refusal reason code, e.g. 'TRANSAC_INC'; empty lists them.")
+    ],
+    message: Annotated[str, Field(max_length=2000, description="Comment sent with it.")],
+) -> dict[str, Any]:
+    """Refuse an electronic invoice wrongly addressed to you: Dougs cancels it and reports the
+    refusal to its issuer."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/sales-invoices/{invoice_id}"
+    invoice, reasons = await asyncio.gather(client.get(path), client.get(f"{path}/refusal-reasons"))
+    if not (invoice.get("can") or {}).get("beRefused"):
+        raise ValueError("this invoice cannot be refused")
+    codes = {r.get("code"): r.get("label") for r in reasons or []}
+    if reason_code not in codes:
+        raise ValueError(f"reason_code must be one of {codes}")
+    refused = await client.post(
+        path,
+        json={
+            "paymentStatus": "canceled",
+            "refusalReasonCode": reason_code,
+            "refusalMessage": message,
+        },
+    )
+    return _invoice_row(refused)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def set_quote_status(
+    quote_id: QuoteId,
+    status: Annotated[
+        Literal["accepted", "refused", "draft"],
+        Field(description="accepted or refused by the client; draft reopens it for editing."),
+    ],
+) -> dict[str, Any]:
+    """Record a finalized quote as accepted or refused (final), or reopen it as a draft."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/invoicing/quotes/{quote_id}"
+    current = (await client.get(path)).get("status")
+    if current == "DRAFT":
+        raise ValueError("this quote is a draft: finalize it first with finalize_sales_document")
+    if status != "draft" and current != "PENDING":
+        raise ValueError(f"only a pending quote can be {status}; this one is {current}")
+    quote = await client.put(path, json={"status": status.upper()})
+    return _quote_url(client, cid, quote)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def create_invoice_from_quote(quote_id: QuoteId) -> dict[str, Any]:
+    """Turn a finalized quote into an invoice draft with its lines; the quote is marked
+    accepted."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/invoicing/quotes/{quote_id}"
+    if (await client.get(path)).get("status") == "DRAFT":
+        raise ValueError("this quote is a draft: finalize it first with finalize_sales_document")
+    draft = await client.post(f"{path}/actions/create-invoice", json={})
+    return _document(client, cid, draft, "sales-invoice")
 
 
 # --- Invoice products --------------------------------------------------------------

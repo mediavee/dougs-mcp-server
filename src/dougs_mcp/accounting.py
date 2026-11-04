@@ -5,10 +5,11 @@ import re
 from datetime import date
 from typing import Annotated, Any, Literal
 
+import httpx
 from pydantic import Field
 
-from .client import DougsClient
-from .server import READ, compact, get_client, mcp
+from .client import DougsClient, DougsError, DougsJobError
+from .server import DESTRUCTIVE, READ, SENDS, compact, get_client, mcp
 
 YearId = Annotated[
     int | None,
@@ -497,6 +498,8 @@ async def list_declarations(
 
 # Item labels per form type, from /declaration-templates (1+ MB each, immutable).
 _template_labels: dict[str, dict[str, str]] = {}
+# Form types whose corrective filings cannot be cancelled.
+_uncancellable_forms: set[str] = set()
 
 
 async def _form_labels(client: DougsClient, form_type: str) -> dict[str, str]:
@@ -508,18 +511,48 @@ async def _form_labels(client: DougsClient, form_type: str) -> dict[str, str]:
             for i in template.get("items") or []
             if not i.get("isGroup") and not i.get("isInternal")
         }
+        if template.get("isUncancellable"):
+            _uncancellable_forms.add(form_type)
         _template_labels[form_type] = labels
     return labels
+
+
+def _blockers(d: dict[str, Any]) -> list[str]:
+    """Error messages Dougs attaches to a filing; any of them disables its confirmation."""
+    slots = (d.get("messages") or {}).get("slots") or {}
+    return [
+        m["message"]
+        for messages in slots.values()
+        for m in messages or []
+        if m.get("type") == "error" and m.get("message")
+    ]
+
+
+# The web app's rules for offering each action on a filing.
+def _can_confirm(d: dict[str, Any]) -> bool:
+    return not d.get("confirmedAt") and not d.get("isReadOnly") and not _blockers(d)
+
+
+def _can_reopen(d: dict[str, Any]) -> bool:
+    return bool(d.get("confirmedAt") and d.get("isDeconfirmable"))
+
+
+def _can_cancel_correction(d: dict[str, Any]) -> bool:
+    return bool(
+        not d.get("confirmedAt")
+        and d.get("originalDeclarationId")
+        and not d.get("correctiveDeclarationId")
+        and d.get("type") not in _uncancellable_forms
+    )
 
 
 @mcp.tool(annotations=READ)
 async def get_declaration(
     declaration_id: Annotated[int, Field(description="Filing id from list_declarations.")],
 ) -> dict[str, Any]:
-    """Return one tax filing with its non-zero form boxes (box code, label, amount) and files.
-
-    Confirming or correcting a filing stays a step in the Dougs app.
-    """
+    """Return one tax filing with its non-zero form boxes (box code, label, amount) and files,
+    what blocks its confirmation, the statements confirming it certifies, and whether
+    confirm_declaration or revise_declaration applies."""
     client = get_client()
     cid = await client.resolve_company_id()
     d = await client.get(f"/companies/{cid}/declarations/{declaration_id}")
@@ -542,11 +575,165 @@ async def get_declaration(
         for f in _files(value)
     ]
     row = _declaration_row(d, None)
+    open_ = not d.get("confirmedAt")
     return compact(
         {
             **row,
+            "depositMode": d.get("depositMode"),
+            "originalDeclarationId": d.get("originalDeclarationId"),
+            "correctiveDeclarationId": d.get("correctiveDeclarationId"),
             "boxes": boxes,
             "files": files,
+            "blockers": _blockers(d) if open_ else None,
+            "confirmStatements": d.get("validationRemoteTransmissionText") if open_ else None,
+            "canConfirm": _can_confirm(d) or None,
+            "canReopen": _can_reopen(d) or None,
+            "canCancelCorrection": _can_cancel_correction(d) or None,
+        }
+    )
+
+
+DeclarationId = Annotated[int, Field(description="Filing id from list_declarations.")]
+
+# As in the web app: CA3 filings need the VAT e-filing setup, 2571-2573 the corporate-tax one.
+_SETUP_FORMS = {"VAT": ("CA3",), "IS": ("2571", "2572", "2573")}
+
+
+async def _check_remote_setup(client: DougsClient, cid: int, form_type: str) -> None:
+    kind = next((k for k, forms in _SETUP_FORMS.items() if form_type.startswith(forms)), None)
+    if kind is None:
+        return
+    setups = await client.get(f"/companies/{cid}/transmission-setup")
+    setup = next((s for s in setups or [] if s.get("type") == kind), None)
+    states = ((setup or {}).get("remoteTransmissionSetupData") or {}).get("states") or []
+    if not states or any(s.get("status") != "success" for s in states):
+        raise ValueError(
+            f"e-filing is not set up for {kind}; run_remote_filing_setup('{kind.lower()}') "
+            "reports what is missing"
+        )
+
+
+@mcp.tool(annotations=SENDS)
+async def confirm_declaration(
+    declaration_id: DeclarationId,
+    statements_accepted: Annotated[
+        bool,
+        Field(
+            description="True only once the user has read and accepted get_declaration's "
+            "`confirmStatements`, which confirming certifies."
+        ),
+    ],
+) -> dict[str, Any]:
+    """File a tax return: Dougs teletransmits it to the tax administration with the payment it
+    authorizes, or records a manual deposit as done."""
+    if not statements_accepted:
+        raise ValueError("show the user get_declaration's confirmStatements and get their consent")
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/declarations/{declaration_id}"
+    d = await client.get(path)
+    if d.get("confirmedAt"):
+        raise ValueError(f"already confirmed on {d['confirmedAt'][:10]}; see revise_declaration")
+    if not _can_confirm(d) or ((d.get("messages") or {}).get("errorCount") or 0) > 0:
+        raise ValueError(
+            "Dougs does not accept this filing yet: "
+            + ("; ".join(_blockers(d)) or "it is read-only (period not open or not ready)")
+        )
+    if (d.get("metadata") or {}).get("isRemoteTransmission"):
+        await _check_remote_setup(client, cid, d.get("type") or "")
+    # The app sends the whole filing back, acknowledged once the user ticked the statements.
+    job = await client.post(
+        f"{path}/actions/confirm", json={"declaration": {**d, "isAcknowledged": True}}
+    )
+    try:
+        metadata = await client.wait_job(job, max_wait=120)
+    except DougsJobError:
+        raise
+    except (DougsError, httpx.HTTPError):
+        metadata = None  # the filing is submitted; only following its job failed
+    if metadata is None:
+        return {"id": declaration_id, "pending": "still processing; check get_declaration"}
+    result = metadata.get("result") or {}
+    return compact(
+        {
+            **_declaration_row(result, None),
+            "blockers": None if result.get("confirmedAt") else _blockers(result),
+        }
+    )
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def revise_declaration(
+    declaration_id: DeclarationId,
+    action: Annotated[
+        Literal["reopen", "cancel_correction"],
+        Field(
+            description=(
+                "reopen = undo the confirmation of a filed return, or open a corrective return "
+                "when the form has one (its id comes back); cancel_correction = delete an "
+                "unconfirmed corrective return."
+            )
+        ),
+    ],
+    reset_later_declarations: Annotated[
+        bool,
+        Field(
+            description=(
+                "reopen only: accept resetting the later filings the correction impacts; set it "
+                "once Dougs refused a reopen for that reason."
+            )
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Reopen a confirmed tax return for changes, or cancel a corrective one. A return that was
+    teletransmitted (`depositMode: auto`) sends a corrective filing when confirmed again."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/declarations/{declaration_id}"
+    d = await client.get(path)
+    await _form_labels(client, d["type"])  # loads the form's isUncancellable flag
+    if action == "cancel_correction":
+        if not _can_cancel_correction(d):
+            raise ValueError("only an unconfirmed corrective return can be cancelled")
+        await client.post(f"{path}/actions/delete-corrective-declaration", json={"declaration": d})
+        return {"deleted": declaration_id, "originalDeclarationId": d["originalDeclarationId"]}
+    if not _can_reopen(d):
+        raise ValueError("only a confirmed return that Dougs allows to change can be reopened")
+    if d.get("isCorrectable"):
+        corrective = await client.post(
+            f"{path}/actions/correct",
+            json={"declaration": d, "resetCorrectiveDeclaration": reset_later_declarations or None},
+        )
+        return compact({"correctiveDeclaration": _declaration_row(corrective, None)})
+    reopened = await client.post(f"{path}/actions/unconfirm", json={})
+    return compact(_declaration_row(reopened, None))
+
+
+# SENDS: its last step checks the account on the tax administration's e-filing channel
+# (the setup holds a deposit id there), and Dougs emails the owner when it ends.
+@mcp.tool(annotations=SENDS)
+async def run_remote_filing_setup(
+    tax: Annotated[Literal["vat", "is"], Field(description="vat = VAT, is = corporate tax.")],
+) -> dict[str, Any]:
+    """Run Dougs' e-filing (télédéclaration) setup assistant and return each step's status: tax
+    regime, IBAN, then the check of the impots.gouv.fr professional space (up to 12 hours)."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    data = await client.get(f"/companies/{cid}/actions/{tax}-assistant") or {}
+    steps = [
+        {
+            "step": s.get("id"),
+            "status": s.get("status"),
+            "message": (s.get("title") or {}).get(s.get("status")),
+            "detail": (s.get("description") or {}).get(s.get("status")),
+        }
+        for s in data.get("states") or []
+    ]
+    return compact(
+        {
+            "finished": data.get("isFinished"),
+            "inError": data.get("isInError") or None,
+            "steps": steps,
         }
     )
 

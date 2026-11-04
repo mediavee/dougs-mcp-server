@@ -1,11 +1,11 @@
 """Account and company: user, company settings, people, bank accounts and connections, to-dos, billing."""
 
 import asyncio
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
-from .server import READ, WRITE, compact, get_client, mcp
+from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
 
 APP_URL = "https://app.dougs.fr"
 
@@ -230,13 +230,19 @@ async def list_bank_accounts(
 async def list_bank_connections() -> list[dict[str, Any]]:
     """Report the health of each bank connection: status, the action the bank asks for (such as
     a strong authentication), when it last fetched data and imported transactions, and its
-    accounts. Re-authenticating or forcing a sync stays a step in the Dougs app."""
+    accounts. sync_bank_connection forces a sync."""
     client = get_client()
     cid = await client.resolve_company_id()
     connections, accounts = await asyncio.gather(
         client.get(f"/companies/{cid}/connections"),
         client.get(f"/companies/{cid}/accounts"),
     )
+    return _connection_rows(connections, accounts)
+
+
+def _connection_rows(
+    connections: list[dict[str, Any]], accounts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     by_connection: dict[int, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for account in accounts:
         for provider in account.get("providers") or []:
@@ -244,7 +250,7 @@ async def list_bank_connections() -> list[dict[str, Any]]:
                 by_connection.setdefault(provider["connectionId"], []).append((account, provider))
     rows = []
     for conn in connections:
-        links = by_connection.get(conn.get("id"), [])
+        links = by_connection.get(conn["id"], [])
         status = conn.get("status") or {}
         ok = status.get("code") == "ok"
         imports: list[str] = [
@@ -280,16 +286,64 @@ async def list_bank_connections() -> list[dict[str, Any]]:
     return rows
 
 
+@mcp.tool(annotations=WRITE)
+async def sync_bank_connection(
+    connection_id: Annotated[int, Field(description="Connection id from list_bank_connections.")],
+    mode: Annotated[
+        Literal["fetch", "new_accounts"],
+        Field(
+            description=(
+                "fetch = fetch the latest data from the bank, also after the user approved an "
+                "access in their bank app; new_accounts = add the accounts opened at the bank "
+                "since the connection was made."
+            )
+        ),
+    ] = "fetch",
+) -> dict[str, Any]:
+    """Synchronize one bank connection and return its state afterwards. A connection whose bank
+    asks for a strong authentication or new credentials cannot be fixed here: the user renews
+    it in the Dougs app, in a browser."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    base = f"/companies/{cid}/connections"
+    conn = next((c for c in await client.get(base) if c.get("id") == connection_id), None)
+    if conn is None:
+        raise ValueError(f"no connection {connection_id}; list_bank_connections lists them")
+    status = conn.get("status") or {}
+    if status.get("action") == "redirect":
+        raise ValueError(
+            f"{conn.get('name')}: {status.get('userMessage') or status.get('message')} "
+            f"The user renews the connection in a browser at {APP_URL}."
+        )
+    if mode == "new_accounts":
+        created = await client.get(f"{base}/{connection_id}/actions/synchronize-new-providers")
+        jobs = [p["job"] for p in created or [] if p.get("job")]
+    else:
+        # The web app always sends fromFinalUser=true for this action.
+        job = await client.post(
+            f"{base}/{connection_id}/actions/synchronize-remote?fromFinalUser=true", json={}
+        )
+        jobs = [job] if job else []
+    finished = await asyncio.gather(*(client.wait_job(j, max_wait=60) for j in jobs))
+    connections, accounts = await asyncio.gather(
+        client.get(base), client.get(f"/companies/{cid}/accounts")
+    )
+    row = next(r for r in _connection_rows(connections, accounts) if r["id"] == connection_id)
+    pending = sum(f is None for f in finished)
+    return {**row, "stillRunning": pending} if pending else row
+
+
 @mcp.tool(annotations=READ)
 async def list_customer_todos() -> list[dict[str, Any]]:
     """List what Dougs is waiting for from the customer (documents to attach, a VAT return to
-    complete, an account to regularize), with due dates and whether each is overdue. Completing
-    or ignoring an item stays a step in the Dougs app."""
+    complete, an account to regularize), with due dates and whether each is overdue, then the
+    tips Dougs suggests (`tip: true`). resolve_customer_todo acts on them."""
     client = get_client()
     cid = await client.resolve_company_id()
-    todos, tasks = await asyncio.gather(
+    todos, tasks, tips = await asyncio.gather(
         client.get(f"/companies/{cid}/customer-todo"),
         client.get(f"/companies/{cid}/customer-tasks"),
+        client.get(f"/companies/{cid}/customer-tip"),
     )
     # customer-tasks carries the real deadline and overdue flag; customer-todo the wording.
     task_by_id = {t.get("id"): t for t in tasks}
@@ -328,7 +382,68 @@ async def list_customer_todos() -> list[dict[str, Any]]:
         )
         for t in task_by_id.values()
     )
+    rows.extend(
+        compact({"id": t.get("id"), "code": t.get("code"), "title": t.get("title"), "tip": True})
+        for t in tips or []
+    )
     return rows
+
+
+# The app asks for a signature, a mandate or a reason of its own before closing these.
+_APP_ONLY_TODOS = {
+    "customer:acceptPdpMandate",
+    "customer:signYousignDocument",
+    "customer:switchCurrentPdp",
+    "customer:createPdpUserAccount",
+    "customer:getHintAndCreatePdpUserAccount",
+    "customer:verifyPdpUserIdentity",
+    "customer:signApiFirstMandate",
+}
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def resolve_customer_todo(
+    item_id: Annotated[int, Field(description="A to-do or tip id from list_customer_todos.")],
+    action: Annotated[
+        Literal["complete", "ignore", "reopen", "ignore_tip"],
+        Field(
+            description=(
+                "complete = mark the to-do done, ignore = dismiss it, reopen = undo a "
+                "completion, ignore_tip = dismiss a tip (`tip: true`)."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Complete, dismiss or reopen a to-do Dougs is waiting on, or dismiss a tip. Dougs reads a
+    completed to-do as the customer's answer; to-dos whose app step asks questions (a consent,
+    a pro space check) are better completed in the app."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    todo = f"/companies/{cid}/customer-todo/{item_id}/actions"
+    if action in ("complete", "ignore"):
+        todos = await client.get(f"/companies/{cid}/customer-todo")
+        item = next((t for t in todos or [] if t.get("id") == item_id), None)
+        if item is None:
+            raise ValueError(f"no to-do {item_id}; see list_customer_todos")
+        if item.get("code") in _APP_ONLY_TODOS:
+            raise ValueError(
+                f"to-do {item_id} ({item['code']}) is a signature, mandate or identity step: "
+                "it needs the Dougs app"
+            )
+    if action == "ignore_tip":
+        await client.post(f"/companies/{cid}/customer-tip/{item_id}/ignore", json={})
+    elif action == "ignore":
+        # The app's reason for an ignore without a dedicated choice list.
+        await client.post(
+            f"{todo}/ignore",
+            json={
+                "ignoredReasonCode": "ignored:other",
+                "ignoredReasonMessage": "Le client a ignoré la tâche",
+            },
+        )
+    else:
+        await client.post(f"{todo}/{'complete' if action == 'complete' else 'uncomplete'}", json={})
+    return {"id": item_id, "done": action}
 
 
 def _billing_row(b: dict[str, Any]) -> dict[str, Any]:

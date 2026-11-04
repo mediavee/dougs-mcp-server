@@ -20,8 +20,8 @@ app uses (`app.dougs.fr`).
   switches for the rest of the session.
 - **Answers** are compact views, not raw payloads: lists are paginated and filtered, and point to
   the tool that gives the detail.
-- **Out of reach on purpose**: finalizing or sending an invoice or a quote, confirming a tax
-  filing, forcing a bank sync. Tools stop at drafts and return the app URL.
+- **Coverage**: what a customer can do in the app, irreversible actions included (finalizing and
+  sending invoices, filing a tax return, syncing a bank). Accountant-only endpoints are left out.
 
 ## Requirements
 
@@ -48,19 +48,23 @@ account: keep `.env` private.
 
 ## Tools
 
-✏️ changes data, ⚠️ deletes or overwrites it; the others only read.
+✏️ changes data, ⚠️ is irreversible or deletes data, 📤 is irreversible and reaches a third
+party (an email, a tax filing, the accountant); the others only read. MCP clients ask before the
+last two from the tool annotations.
 
 ### Account and company
 
 | Tool | What it does |
 |---|---|
 | `get_account` | Return who is logged in and the companies they can act on; every tool acts on the one flagged `isDefault` (switch with select_company). get_company gives its settings. |
-| `select_company` | Switch the company every other tool acts on, for the rest of the session. |
+| `select_company` ✏️ | Switch the company every other tool acts on, for the rest of the session. |
 | `get_company` | Return a company's identity and accounting settings: legal form, SIREN, activity, VAT regime and periodicity, tax regime, current fiscal year, lock date and Dougs plan. |
 | `list_company_people` | List the people and companies holding a role in the company: officers (gérant, président), associates with their shares, and employees, with each role's dates. |
 | `list_bank_accounts` | List the company's bank and treasury accounts (Qonto, PayPal, Stripe…) with their balance. `filterValue` goes to list_operations(treasury_account_id=...); list_bank_connections tells whether their synchronization works. |
-| `list_bank_connections` | Report the health of each bank connection: status, the action the bank asks for (such as a strong authentication), when it last fetched data and imported transactions, and its accounts. Re-authenticating or forcing a sync stays a step in the Dougs app. |
-| `list_customer_todos` | List what Dougs is waiting for from the customer (documents to attach, a VAT return to complete, an account to regularize), with due dates and whether each is overdue. Completing or ignoring an item stays a step in the Dougs app. |
+| `list_bank_connections` | Report the health of each bank connection: status, the action the bank asks for (such as a strong authentication), when it last fetched data and imported transactions, and its accounts. sync_bank_connection forces a sync. |
+| `sync_bank_connection` ✏️ | Synchronize one bank connection and return its state afterwards. A connection whose bank asks for a strong authentication or new credentials cannot be fixed here: the user renews it in the Dougs app, in a browser. |
+| `list_customer_todos` | List what Dougs is waiting for from the customer (documents to attach, a VAT return to complete, an account to regularize), with due dates and whether each is overdue, then the tips Dougs suggests (`tip: true`). resolve_customer_todo acts on them. |
+| `resolve_customer_todo` ⚠️ | Complete, dismiss or reopen a to-do Dougs is waiting on, or dismiss a tip. Dougs reads a completed to-do as the customer's answer; to-dos whose app step asks questions (a consent, a pro space check) are better completed in the app. |
 | `list_billing_invoices` | List the invoices Dougs bills the company for its subscription, newest first, with the upcoming one and the plan. Pass an invoice's `filePath` to get_file_url to download its PDF. |
 
 ### Bank operations
@@ -70,17 +74,20 @@ account: keep `.env` private.
 | `list_operations` | Search bank operations, newest first, one compact row each: signed amount (negative = money out), category labels, validation state and whether a receipt is attached. Call get_operation for an operation's lines, VAT, questions and receipts. |
 | `count_operations` | Count the operations matching the filters that are still to validate, need attention, or are validated. Dougs stops counting at 100, reported as "100+". |
 | `validate_operation` ✏️ | Validate an operation, confirming its categorization; an uncategorized one is filed under "Non catégorisé". Returns the operation as get_operation does. |
+| `request_categorization_help` 📤 | Ask the Dougs accountant to categorize an operation; they answer in the app. Returns the operation as get_operation does. |
 | `get_operation` | Return one operation with its accounting lines (category, VAT, what is editable, the questions Dougs asks about each), its receipts and any suggested receipt. |
 | `update_operation` ✏️ | Set an operation's memo, or change the date or amount of an expense report or cash receipt created with create_operation. |
 | `create_operation` ✏️ | Create an expense report or a cash receipt, to validate like a bank operation. Attach its receipt with add_attachment. |
+| `create_mileage_allowance` ✏️ | Record a mileage allowance (indemnité kilométrique) for a business trip in a personal vehicle; Dougs computes the amount from the official scale. Delete it with delete_operation. |
 | `delete_operation` ⚠️ | Delete an expense report, cash receipt or mileage allowance for good. Bank transactions cannot be deleted. |
 | `list_available_categories` | List the categories Dougs accepts for one line, suggested ones first: pick set_breakdown_category's category_id here. `asksQuestions` marks categories whose VAT is settled by a question once assigned. |
 | `search_categories` | Search the company's category catalog, or resolve category ids to labels. To categorize an existing line, list_available_categories is narrower: it returns only what Dougs accepts for that line. |
 | `list_question_options` | List the accepted answers to one question of a line (VAT exemption reasons, suppliers, loans…); pass an item's `value` to set_breakdown_association. |
-| `set_breakdown_category` ✏️ | Change the category of one line. Re-read `questions` in the result: Dougs drops the answers the new category does not use, and does not restore them on switching back. |
+| `set_breakdown_category` ⚠️ | Change the category of one line. Re-read `questions` in the result: Dougs drops the answers the new category does not use, and does not restore them on switching back. |
 | `set_breakdown_association` ✏️ | Answer one of the questions Dougs asks about a line (supplier, loan, partner, period…). |
+| `apply_to_similar_operations` ⚠️ | Copy an operation's categorization onto the operations Dougs finds similar, as the app does after a change; returns the operations it changed. |
 | `set_breakdown_vat` ✏️ | Override the VAT of one line. The rate comes from the category: change it with set_breakdown_category. |
-| `split_operation` ✏️ | Split an operation into several categorized lines. A result with isTotalAmountValid false means the amounts do not add up. |
+| `split_operation` ⚠️ | Split an operation into several categorized lines. A result with isTotalAmountValid false means the amounts do not add up. |
 | `add_attachment` ✏️ | Attach a receipt or invoice file to an operation. Dougs files it as a vendor invoice in Purchases and reads its date and amount within a few seconds. |
 | `remove_attachment` ✏️ | Detach a receipt from an operation. The document itself stays in Purchases as a vendor invoice; delete it there if it was attached by mistake. |
 
@@ -93,25 +100,37 @@ account: keep `.env` private.
 | `upload_vendor_invoice` ✏️ | Upload a supplier invoice file; Dougs reads it by OCR within seconds. Returns the new invoice; call get_vendor_invoice again once `ocr` is no longer 'initialised' to see what it read, and fix it with update_vendor_invoice. |
 | `update_vendor_invoice` ✏️ | Correct the fields of a vendor invoice, typically what the OCR misread; only the fields given change. E-invoices received through the e-invoicing network are locked except memo. |
 | `delete_vendor_invoice` ⚠️ | Delete a vendor invoice and its file. Dougs refuses while it is attached to a validated operation. |
-| `attach_vendor_invoice` ✏️ | Attach a vendor invoice to the bank operation that paid it, as its receipt, or detach it. Dougs refuses to detach from a validated operation: un-validate it first with validate_operation, then validate it again. The invoice's payment status follows a few seconds later, so the status in this answer is the previous one. |
+| `attach_vendor_invoice` ✏️ | Attach a vendor invoice to the bank operations that paid it, as their receipt, or detach it. Dougs refuses to detach from a validated operation: un-validate it first with validate_operation, then validate it again. The invoice's payment status follows a few seconds later, so the status in this answer is the previous one. |
+| `review_vendor_invoice_match` ⚠️ | Accept or reject the bank operation Dougs suggests as the payment of a vendor invoice (suggested_operation in get_vendor_invoice). To attach another operation, use attach_vendor_invoice. |
+| `set_vendor_invoice_status` 📤 | Mark a vendor invoice paid or unpaid, or refuse an e-invoice. On an e-invoice the status reaches the supplier through the e-invoicing network ('Paiement transmis', or the refusal with its reason). |
+| `move_vendor_invoice_to_sales` ⚠️ | Move an uploaded document filed by mistake under purchases to the sales invoices; it gets a new id there. Dougs refuses to move it back. |
 
 ### Sales
 
 | Tool | What it does |
 |---|---|
-| `list_sales_invoices` | List finalized sales invoices, newest first: number, client, amounts, payment status and the bank operations they are matched to. Drafts are in list_sales_invoice_drafts. |
+| `list_sales_invoices` | List finalized sales invoices, newest first: number, client, amounts, payment status and the bank operations they are matched or suggested to. Drafts are in list_sales_invoice_drafts. |
 | `get_sales_overview` | Sales dashboard: invoice and quote counts, issued/waiting/late amounts, receivables aging, and the year's net revenue by month and by client. |
 | `list_customers` | List registered customers (the address book used for invoices and quotes). |
 | `save_customer` ✏️ | Create a customer, or change one (only the arguments passed change). Documents already issued keep the client details they were made with. |
 | `delete_customer` ⚠️ | Delete a registered customer. To keep it out of lists without deleting it, archive it with save_customer. |
 | `list_sales_invoice_drafts` | List sales invoice drafts (not finalized) with client, dates and totals; read the lines with get_sales_invoice_draft. |
-| `get_sales_invoice_draft` | Read a sales invoice draft: client, dates, lines, totals and its app URL. |
-| `save_sales_invoice_draft` ✏️ | Create a sales invoice draft, or change one (only the arguments passed change; a new date or delay recomputes the due date). Dougs computes the totals. A draft is never finalized nor sent: that stays in the app (returned url). |
+| `get_sales_invoice_draft` | Read a sales invoice draft: client, dates, lines, totals, its app URL and what still blocks finalizing it. |
+| `save_sales_invoice_draft` ✏️ | Create a sales invoice draft, or change one (only the arguments passed change; a new date or delay recomputes the due date). Dougs computes the totals; finalize it with finalize_sales_document. |
 | `delete_sales_invoice_draft` ⚠️ | Delete a sales invoice draft. Finalized invoices cannot be deleted here. |
 | `list_quotes` | List quotes (devis), drafts included, newest first: number, status, client, dates and totals. Read a draft's lines with get_quote_draft. |
-| `get_quote_draft` | Read a quote draft: client, dates, lines, totals and its app URL. |
-| `save_quote_draft` ✏️ | Create a quote (devis) draft, or change one (only the arguments passed change; a new date or validity recomputes the expiration). Dougs computes the totals. A draft is never finalized nor sent: that stays in the app (returned url). |
+| `get_quote_draft` | Read a quote draft: client, dates, lines, totals, its app URL and what still blocks finalizing it. |
+| `save_quote_draft` ✏️ | Create a quote (devis) draft, or change one (only the arguments passed change; a new date or validity recomputes the expiration). Dougs computes the totals; finalize it with finalize_sales_document. |
 | `delete_quote_draft` ⚠️ | Delete a quote draft. Issued quotes cannot be deleted here. |
+| `finalize_sales_document` ⚠️ | Finalize an invoice or quote draft: Dougs numbers it, issues its PDF and freezes it. Fails with what is missing when the draft is incomplete; send it with send_sales_document. |
+| `send_sales_document` 📤 | Email a finalized invoice or quote to the client, with its PDF attached. |
+| `duplicate_sales_document` ✏️ | Copy an invoice or quote, finalized or draft, into a new draft. |
+| `refund_sales_invoice` ⚠️ | Create the credit note (avoir) that cancels a finalized invoice, as a draft with the amounts negated: adjust it with save_sales_invoice_draft, then finalize it. |
+| `set_sales_invoice_paid` ✏️ | Mark a finalized invoice paid or unpaid by hand, when no bank operation settles it. |
+| `review_sales_invoice_match` ⚠️ | Accept or reject the bank operation Dougs suggests for a sales invoice (suggestedOperationId in list_sales_invoices). |
+| `refuse_sales_invoice` 📤 | Refuse an electronic invoice wrongly addressed to you: Dougs cancels it and reports the refusal to its issuer. |
+| `set_quote_status` ⚠️ | Record a finalized quote as accepted or refused (final), or reopen it as a draft. |
+| `create_invoice_from_quote` ⚠️ | Turn a finalized quote into an invoice draft with its lines; the quote is marked accepted. |
 | `list_invoice_products` | List the company's saved products and services, with their unit price and VAT rate, to reuse as invoice or quote lines. |
 | `save_invoice_product` ✏️ | Save a product or service to reuse on invoices and quotes, or change one (only the arguments passed change). |
 | `delete_invoice_product` ⚠️ | Delete a saved product. Invoices and quotes that used it keep their lines. |
@@ -129,7 +148,10 @@ account: keep `.env` private.
 | `list_investments` | List the company's fixed assets (immobilisations) and their depreciation, with totals. Each asset gives its purchase, depreciation plan, amounts already written off and the sale date if it was disposed of. |
 | `list_loans` | List the company's loans: amount, start date, duration in months, rate, contract files. |
 | `list_declarations` | List the company's tax filings (VAT, corporate tax, CFE, accounts approval), latest due first. Gives the period, due date, amount and filing state of each; get_declaration returns the figures of one filing. |
-| `get_declaration` | Return one tax filing with its non-zero form boxes (box code, label, amount) and files. Confirming or correcting a filing stays a step in the Dougs app. |
+| `get_declaration` | Return one tax filing with its non-zero form boxes (box code, label, amount) and files, what blocks its confirmation, the statements confirming it certifies, and whether confirm_declaration or revise_declaration applies. |
+| `confirm_declaration` 📤 | File a tax return: Dougs teletransmits it to the tax administration with the payment it authorizes, or records a manual deposit as done. |
+| `revise_declaration` ⚠️ | Reopen a confirmed tax return for changes, or cancel a corrective one. A return that was teletransmitted (`depositMode: auto`) sends a corrective filing when confirmed again. |
+| `run_remote_filing_setup` 📤 | Run Dougs' e-filing (télédéclaration) setup assistant and return each step's status: tax regime, IBAN, then the check of the impots.gouv.fr professional space (up to 12 hours). |
 | `get_company_summary` | Return the accountant's summary of the company for one year. Legal form, tax and VAT regimes with their history, capital, partners and employees, activity, and the Kbis and bylaws files. |
 
 ### Files and raw access

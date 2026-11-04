@@ -10,7 +10,7 @@ from urllib.parse import quote
 from pydantic import Field
 
 from .client import DougsClient
-from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
+from .server import DESTRUCTIVE, READ, SENDS, WRITE, compact, get_client, mcp
 
 # The list endpoint filters on these values only; "not_paid_or_partially_paid" covers both open states.
 _STATUS_FILTER = {"paid": "paid", "unpaid": "not_paid_or_partially_paid"}
@@ -84,6 +84,7 @@ def _detail(inv: dict[str, Any]) -> dict[str, Any]:
             "ocr": inv.get("prefillStatus"),
             "source": inv.get("source"),
             "locked": inv.get("isLocked") or None,
+            "refusable": (inv.get("can") or {}).get("beRefused") or None,
             "refusal_reason": inv.get("refusalReasonCode"),
             "refusal_message": inv.get("refusalMessage"),
             "e_invoice_history": [
@@ -285,10 +286,17 @@ async def delete_vendor_invoice(invoice_id: InvoiceId) -> dict[str, str]:
 @mcp.tool(annotations=WRITE)
 async def attach_vendor_invoice(
     invoice_id: InvoiceId,
-    operation_id: Annotated[int, Field(description="Bank operation id from list_operations.")],
-    detach: Annotated[bool, Field(description="True to remove the link instead.")] = False,
+    operation_ids: Annotated[
+        list[int],
+        Field(
+            min_length=1,
+            description="Bank operation ids from list_operations, e.g. [288071055]; several "
+            "when the invoice was paid in installments.",
+        ),
+    ],
+    detach: Annotated[bool, Field(description="True to remove the links instead.")] = False,
 ) -> dict[str, Any]:
-    """Attach a vendor invoice to the bank operation that paid it, as its receipt, or detach it.
+    """Attach a vendor invoice to the bank operations that paid it, as their receipt, or detach it.
 
     Dougs refuses to detach from a validated operation: un-validate it first with
     validate_operation, then validate it again. The invoice's payment status follows a few
@@ -299,6 +307,102 @@ async def attach_vendor_invoice(
     action = "detach-operations" if detach else "attach-operations"
     updated = await client.post(
         f"/companies/{cid}/vendor-invoices/{invoice_id}/actions/{action}",
-        json={"operationIds": [operation_id]},
+        json={"operationIds": operation_ids},
     )
     return _detail(updated)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def review_vendor_invoice_match(
+    invoice_id: InvoiceId,
+    action: Annotated[
+        Literal["accept", "reject"],
+        Field(
+            description="'accept' attaches the suggested operation; 'reject' dismisses the "
+            "suggestion."
+        ),
+    ],
+) -> dict[str, Any]:
+    """Accept or reject the bank operation Dougs suggests as the payment of a vendor invoice
+    (suggested_operation in get_vendor_invoice). To attach another operation, use
+    attach_vendor_invoice."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    invoice = await _invoice(client, cid, invoice_id)
+    if not invoice.get("matchedOperation"):
+        raise ValueError(
+            f"vendor invoice {invoice_id} has no suggested operation; attach one with "
+            "attach_vendor_invoice"
+        )
+    updated = await client.post(
+        f"/companies/{cid}/vendor-invoices/{invoice_id}/actions/{action}-matched-operation",
+        json={},
+    )
+    return _detail(updated)
+
+
+@mcp.tool(annotations=SENDS)
+async def set_vendor_invoice_status(
+    invoice_id: InvoiceId,
+    status: Annotated[
+        Literal["paid", "not_paid", "refused"],
+        Field(
+            description="'refused' is final and only for refusable e-invoices "
+            "(get_vendor_invoice's `refusable`)."
+        ),
+    ],
+    refusal_reason: Annotated[
+        str | None,
+        Field(
+            description="Refusal code, e.g. 'DOUBLON'; omit it with status='refused' to get "
+            "the list."
+        ),
+    ] = None,
+    refusal_message: Annotated[
+        str | None, Field(max_length=2000, description="Refusal comment sent to the supplier.")
+    ] = None,
+) -> dict[str, Any]:
+    """Mark a vendor invoice paid or unpaid, or refuse an e-invoice. On an e-invoice the
+    status reaches the supplier through the e-invoicing network ('Paiement transmis', or the
+    refusal with its reason)."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    path = f"/companies/{cid}/vendor-invoices/{invoice_id}"
+    can = (await _invoice(client, cid, invoice_id)).get("can") or {}
+    body: dict[str, Any] = {"paymentStatus": status}
+    if status == "refused":
+        if not can.get("beRefused"):
+            raise ValueError(
+                f"vendor invoice {invoice_id} cannot be refused: only e-invoices not yet "
+                "attached to an operation or paid can"
+            )
+        if not refusal_reason or not refusal_message:
+            reasons = await client.get(f"{path}/refusal-reasons")
+            codes = {r.get("code"): r.get("label") for r in reasons}
+            raise ValueError(
+                f"pass refusal_reason, one of {codes}, and a refusal_message for the supplier"
+            )
+        body |= {"refusalReasonCode": refusal_reason, "refusalMessage": refusal_message}
+    elif not can.get("updatePaymentStatus"):
+        raise ValueError(f"Dougs does not allow changing the status of vendor invoice {invoice_id}")
+    return _detail(await client.put(path, json=body))
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def move_vendor_invoice_to_sales(invoice_id: InvoiceId) -> dict[str, Any]:
+    """Move an uploaded document filed by mistake under purchases to the sales invoices; it
+    gets a new id there. Dougs refuses to move it back."""
+    client = get_client()
+    cid = await client.resolve_company_id()
+    moved = await client.post(
+        f"/companies/{cid}/invoices-switch/{invoice_id}/actions/move-to-sales-invoices", json={}
+    )
+    return compact(
+        {
+            "sales_invoice_id": moved.get("id"),
+            "client": moved.get("clientName"),
+            "number": moved.get("reference"),
+            "date": _day(moved.get("date")),
+            "amount": moved.get("amount"),
+        }
+    )
