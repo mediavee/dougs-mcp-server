@@ -10,7 +10,7 @@ from urllib.parse import quote
 from pydantic import Field
 
 from .client import DougsClient
-from .server import DESTRUCTIVE, READ, WRITE, CompanyId, compact, get_client, mcp
+from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
 
 # The list endpoint filters on these values only; "not_paid_or_partially_paid" covers both open states.
 _STATUS_FILTER = {"paid": "paid", "unpaid": "not_paid_or_partially_paid"}
@@ -137,7 +137,6 @@ async def list_vendor_invoices(
     date_to: Annotated[date | None, Field(description="Invoice date on or before.")] = None,
     limit: Annotated[int, Field(ge=1, le=200, description="Rows per page.")] = 20,
     offset: Annotated[int, Field(ge=0, description="Rows to skip.")] = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List vendor (supplier) invoices, most recent first (undated ones on top), as compact rows.
 
@@ -145,7 +144,7 @@ async def list_vendor_invoices(
     for one invoice's detail and file path.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     params: dict[str, Any] = {}
     if status:
         params["paymentStatus"] = _STATUS_FILTER[status]
@@ -178,12 +177,12 @@ async def list_vendor_invoices(
 
 
 @mcp.tool(annotations=READ)
-async def get_vendor_invoice(invoice_id: InvoiceId, company_id: CompanyId = None) -> dict[str, Any]:
+async def get_vendor_invoice(invoice_id: InvoiceId) -> dict[str, Any]:
     """One vendor invoice in detail: supplier, amounts, VAT breakdown, OCR status, refusal,
     attached and suggested operations, the fields update_vendor_invoice may change, and the
     file_path to pass to get_file_url."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     return _detail(await _invoice(client, cid, invoice_id))
 
 
@@ -192,7 +191,6 @@ async def upload_vendor_invoice(
     file_path: Annotated[
         str, Field(description="Local path of a PDF or image, e.g. '/tmp/facture-ovh.pdf'.")
     ],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Upload a supplier invoice file; Dougs reads it by OCR within seconds.
 
@@ -202,7 +200,7 @@ async def upload_vendor_invoice(
     name, content = await asyncio.to_thread(_read_file, file_path)
     mime = mimetypes.guess_type(name)[0]
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     base = f"/companies/{cid}/vendor-invoices"
     accepted = await client.get(f"{base}/file-types")
     if mime not in accepted:
@@ -241,7 +239,6 @@ async def update_vendor_invoice(
         str | None, Field(description="Intra-EU VAT number, e.g. 'FR67824012173'.")
     ] = None,
     memo: Annotated[str | None, Field(description="Free note.")] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Correct the fields of a vendor invoice, typically what the OCR misread; only the fields
     given change. E-invoices received through the e-invoicing network are locked except memo."""
@@ -262,7 +259,7 @@ async def update_vendor_invoice(
     if not changes:
         raise ValueError("nothing to update: pass at least one field")
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     allowed = (await _invoice(client, cid, invoice_id)).get("allowedUpdateFields") or []
     refused = [k for k in changes if k not in allowed]
     if refused:
@@ -276,13 +273,11 @@ async def update_vendor_invoice(
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-async def delete_vendor_invoice(
-    invoice_id: InvoiceId, company_id: CompanyId = None
-) -> dict[str, str]:
+async def delete_vendor_invoice(invoice_id: InvoiceId) -> dict[str, str]:
     """Delete a vendor invoice and its file. Dougs refuses while it is attached to a validated
     operation."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     await client.delete(f"/companies/{cid}/vendor-invoices/{invoice_id}")
     return {"deleted": invoice_id}
 
@@ -292,7 +287,6 @@ async def attach_vendor_invoice(
     invoice_id: InvoiceId,
     operation_id: Annotated[int, Field(description="Bank operation id from list_operations.")],
     detach: Annotated[bool, Field(description="True to remove the link instead.")] = False,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Attach a vendor invoice to the bank operation that paid it, as its receipt, or detach it.
 
@@ -301,7 +295,7 @@ async def attach_vendor_invoice(
     seconds later, so the status in this answer is the previous one.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     action = "detach-operations" if detach else "attach-operations"
     updated = await client.post(
         f"/companies/{cid}/vendor-invoices/{invoice_id}/actions/{action}",

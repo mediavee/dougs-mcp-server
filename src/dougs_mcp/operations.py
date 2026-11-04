@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from pydantic import BaseModel, Field
 
 from .client import DougsClient
-from .server import DESTRUCTIVE, READ, WRITE, CompanyId, compact, get_client, mcp
+from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
 
 OperationId = Annotated[int, Field(description="Operation id, from list_operations.")]
 BreakdownId = Annotated[
@@ -158,13 +158,12 @@ async def list_operations(
     needs_attention: NeedsAttention = None,
     limit: Annotated[int, Field(ge=1, le=200, description="Rows per page.")] = 25,
     offset: Annotated[int, Field(ge=0, description="Rows to skip, for the next page.")] = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Search bank operations, newest first, one compact row each: signed amount (negative =
     money out), category labels, validation state and whether a receipt is attached. Call
     get_operation for an operation's lines, VAT, questions and receipts."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     params = _operation_filters(
         query, amount, date_from, date_to, inbound, operation_type, treasury_account_id
     )
@@ -193,12 +192,11 @@ async def count_operations(
     inbound: Inbound = None,
     operation_type: OperationType = None,
     treasury_account_id: TreasuryAccount = None,
-    company_id: CompanyId = None,
 ) -> dict[str, int | str]:
     """Count the operations matching the filters that are still to validate, need attention, or
     are validated. Dougs stops counting at 100, reported as "100+"."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     filters = _operation_filters(
         query, amount, date_from, date_to, inbound, operation_type, treasury_account_id
     )
@@ -223,12 +221,11 @@ async def count_operations(
 async def validate_operation(
     operation_id: OperationId,
     validated: Annotated[bool, Field(description="False re-opens a validated operation.")] = True,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Validate an operation, confirming its categorization; an uncategorized one is filed
     under "Non catégorisé". Returns the operation as get_operation does."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     operation["validated"] = validated
     return _operation_view(await client.update_operation(cid, operation))
@@ -411,11 +408,11 @@ def _replace_breakdown(operation: dict[str, Any], updated: dict[str, Any]) -> li
 
 
 @mcp.tool(annotations=READ)
-async def get_operation(operation_id: OperationId, company_id: CompanyId = None) -> dict[str, Any]:
+async def get_operation(operation_id: OperationId) -> dict[str, Any]:
     """Return one operation with its accounting lines (category, VAT, what is editable, the
     questions Dougs asks about each), its receipts and any suggested receipt."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     op, accounts = await asyncio.gather(
         client.operation(cid, operation_id), _account_labels(client, cid)
     )
@@ -437,14 +434,13 @@ async def update_operation(
         float | None,
         Field(gt=0, description="New amount in euros; expense reports and cash receipts only."),
     ] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Set an operation's memo, or change the date or amount of an expense report or cash
     receipt created with create_operation."""
     if memo is None and date is None and amount is None:
         raise ValueError("pass at least one of memo, date or amount")
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     if (date is not None or amount is not None) and operation.get("type") not in (
         "expense",
@@ -504,13 +500,12 @@ async def create_operation(
             "only one when there is a single one."
         ),
     ] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Create an expense report or a cash receipt, to validate like a bank operation. Attach
     its receipt with add_attachment."""
     _iso_to_fr(date)  # validates the format
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     amount = round(amount, 2)
     breakdowns: list[dict[str, Any]] = [{"amount": amount, "categoryId": category_id}]
     if kind == "expense":
@@ -548,13 +543,11 @@ async def create_operation(
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-async def delete_operation(
-    operation_id: OperationId, company_id: CompanyId = None
-) -> dict[str, Any]:
+async def delete_operation(operation_id: OperationId) -> dict[str, Any]:
     """Delete an expense report, cash receipt or mileage allowance for good. Bank transactions
     cannot be deleted."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     if operation.get("type") not in _HAND_MADE_TYPES:
         raise ValueError(
@@ -579,13 +572,12 @@ async def list_available_categories(
         bool, Field(description="Only the few categories Dougs suggests for this line.")
     ] = False,
     limit: Annotated[int, Field(ge=1, le=200, description="Maximum rows.")] = 40,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List the categories Dougs accepts for one line, suggested ones first: pick
     set_breakdown_category's category_id here. `asksQuestions` marks categories whose VAT is
     settled by a question once assigned."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     base = f"/companies/{cid}/operations/{operation_id}/breakdowns/{breakdown_id}"
     params: dict[str, Any] = {}
     if search:
@@ -628,13 +620,12 @@ async def search_categories(
         Field(description="Only the categories create_operation accepts for this kind."),
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200, description="Maximum rows.")] = 40,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Search the company's category catalog, or resolve category ids to labels. To categorize
     an existing line, list_available_categories is narrower: it returns only what Dougs
     accepts for that line."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     catalog = await client.category_catalog(cid)
     allowed: set[int] | None = set(ids) if ids else None
     if new_operation_kind:
@@ -686,12 +677,11 @@ async def list_question_options(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200, description="Maximum answers.")] = 50,
     offset: Annotated[int, Field(ge=0, description="Answers to skip.")] = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List the accepted answers to one question of a line (VAT exemption reasons, suppliers,
     loans…); pass an item's `value` to set_breakdown_association."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     breakdown = _find_breakdown(operation, breakdown_id)
     _, slot_name, _ = _find_slot(breakdown, association, slot)
@@ -725,12 +715,11 @@ async def set_breakdown_category(
     operation_id: OperationId,
     breakdown_id: BreakdownId,
     category_id: Annotated[int, Field(description="Category id, from list_available_categories.")],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Change the category of one line. Re-read `questions` in the result: Dougs drops the
     answers the new category does not use, and does not restore them on switching back."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     breakdown = _find_breakdown(operation, breakdown_id)
     if not breakdown.get("isCategoryEditable"):
@@ -758,11 +747,10 @@ async def set_breakdown_association(
     slot: Annotated[
         str | None, Field(description="Slot name; omit when the association has a single one.")
     ] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Answer one of the questions Dougs asks about a line (supplier, loan, partner, period…)."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     breakdown = _find_breakdown(operation, breakdown_id)
     _, slot_name, slot_def = _find_slot(breakdown, association, slot)
@@ -796,7 +784,6 @@ async def set_breakdown_vat(
             "Union'; list_question_options(association='vatExemptionReason') lists them."
         ),
     ] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Override the VAT of one line. The rate comes from the category: change it with
     set_breakdown_category."""
@@ -807,7 +794,7 @@ async def set_breakdown_vat(
     if vat_amount is not None and automatic_vat:
         raise ValueError("vat_amount and automatic_vat are mutually exclusive")
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     breakdown = _find_breakdown(operation, breakdown_id)
     updated = {**breakdown}
@@ -858,12 +845,11 @@ async def split_operation(
             "deleted. Amounts should add up to the operation's.",
         ),
     ],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Split an operation into several categorized lines. A result with isTotalAmountValid
     false means the amounts do not add up."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
     if len(lines) > 1 and not operation.get("allowAddingBreakdown"):
         raise ValueError(f"operation {operation_id} does not accept several breakdowns")
@@ -918,13 +904,12 @@ def _receipts(op: dict[str, Any]) -> dict[str, Any]:
 async def add_attachment(
     operation_id: OperationId,
     file_path: Annotated[str, Field(description="Local PDF or image, e.g. '~/receipt.pdf'.")],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Attach a receipt or invoice file to an operation. Dougs files it as a vendor invoice
     in Purchases and reads its date and amount within a few seconds."""
     name, content, content_type = await asyncio.to_thread(_read_upload, file_path)
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     op = await client.post(
         f"/companies/{cid}/operations/{operation_id}/source-document-attachments/actions/create-from-formdata",
         files={"file": (name, content, content_type)},
@@ -936,12 +921,11 @@ async def add_attachment(
 async def remove_attachment(
     operation_id: OperationId,
     attachment_id: Annotated[int, Field(description="Receipt id, from get_operation's receipts.")],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Detach a receipt from an operation. The document itself stays in Purchases as a vendor
     invoice; delete it there if it was attached by mistake."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     op = await client.delete(
         f"/companies/{cid}/operations/{operation_id}/source-document-attachments/{attachment_id}"
     )

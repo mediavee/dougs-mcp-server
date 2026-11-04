@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field
 
 from .client import DougsClient
-from .server import READ, CompanyId, compact, get_client, mcp
+from .server import READ, compact, get_client, mcp
 
 YearId = Annotated[
     int | None,
@@ -59,14 +59,14 @@ def _files(attachments: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
 
 
 @mcp.tool(annotations=READ)
-async def list_accounting_years(company_id: CompanyId = None) -> list[dict[str, Any]]:
+async def list_accounting_years() -> list[dict[str, Any]]:
     """List the company's accounting (fiscal) years, the active one flagged `active`.
 
     Closed years carry their closing documents (balance sheet, FEC, final print), whose `url`
     goes to get_file_url.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     years, active = await asyncio.gather(
         client.get(f"/companies/{cid}/accounting-years"),
         client.get(f"/companies/{cid}/accounting-years/active"),
@@ -170,14 +170,13 @@ async def get_accounting_stat(
     monthly: Annotated[
         bool, Field(description="Include month-by-month values, keyed by month-end date.")
     ] = False,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Return an aggregated figure of one accounting year (totals; monthly values on request).
 
     Income-statement lines carry a `seriesName` to pass to get_metrics for a multi-year trend.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     year_id = await _year_id(client, cid, accounting_year_id)
     params: dict[str, Any] = {"accountingYearId": year_id}
     if show_previous:
@@ -193,7 +192,6 @@ async def get_accounting_stat(
 @mcp.tool(annotations=READ)
 async def get_category_breakdown(
     accounting_year_id: YearId = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Return one accounting year's income and expenses per accounting category and account.
 
@@ -202,7 +200,7 @@ async def get_category_breakdown(
     year's results (gross margin, EBITDA, operating, fiscal) and the growth against last year.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     year_id = await _year_id(client, cid, accounting_year_id)
     stats = await client.get(
         f"/companies/{cid}/accounting-stats", params={"accountingYearId": year_id}
@@ -262,7 +260,6 @@ async def list_metrics(
     include_accounts: Annotated[
         bool, Field(description="Add the account number ranges each series aggregates.")
     ] = False,
-    company_id: CompanyId = None,
 ) -> list[dict[str, Any]]:
     """List the company's monthly accounting time series, from its first year to now.
 
@@ -270,7 +267,7 @@ async def list_metrics(
     `name` to get_metrics. `balance: true` marks a running balance rather than a flow.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     catalog = await client.metric_catalog(cid)
     needle = (search or "").casefold()
     rows = []
@@ -311,7 +308,6 @@ async def get_metrics(
     include_future: Annotated[
         bool, Field(description="Keep the zero-valued periods Dougs pads after today.")
     ] = False,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Return the values of accounting time series, in euros, for trends over several years.
 
@@ -319,7 +315,7 @@ async def get_metrics(
     (`partial: true`).
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     catalog = await client.metric_catalog(cid)
     full = [n if n in catalog else _METRIC_PREFIX + n for n in names]
     unknown = [n for n, f in zip(names, full, strict=True) if f not in catalog]
@@ -359,14 +355,14 @@ async def get_metrics(
 
 
 @mcp.tool(annotations=READ)
-async def list_investments(company_id: CompanyId = None) -> dict[str, Any]:
+async def list_investments() -> dict[str, Any]:
     """List the company's fixed assets (immobilisations) and their depreciation, with totals.
 
     Each asset gives its purchase, depreciation plan, amounts already written off and the sale
     date if it was disposed of.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     investments, stats = await asyncio.gather(
         client.get(f"/companies/{cid}/investments"),
         client.get(f"/companies/{cid}/investments/stats"),
@@ -394,10 +390,10 @@ async def list_investments(company_id: CompanyId = None) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ)
-async def list_loans(company_id: CompanyId = None) -> list[dict[str, Any]]:
+async def list_loans() -> list[dict[str, Any]]:
     """List the company's loans: amount, start date, duration in months, rate, contract files."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     loans = await client.get(f"/companies/{cid}/loans")
     return compact(
         [
@@ -466,7 +462,6 @@ async def list_declarations(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200, description="Rows to return.")] = 30,
     offset: Annotated[int, Field(ge=0, description="Rows to skip, for the next page.")] = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List the company's tax filings (VAT, corporate tax, CFE, accounts approval), latest due first.
 
@@ -474,7 +469,7 @@ async def list_declarations(
     figures of one filing.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     statuses = [status] if status else list(_DECLARATION_STATUS)
     pages = await asyncio.gather(
         *(
@@ -520,14 +515,13 @@ async def _form_labels(client: DougsClient, form_type: str) -> dict[str, str]:
 @mcp.tool(annotations=READ)
 async def get_declaration(
     declaration_id: Annotated[int, Field(description="Filing id from list_declarations.")],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Return one tax filing with its non-zero form boxes (box code, label, amount) and files.
 
     Confirming or correcting a filing stays a step in the Dougs app.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     d = await client.get(f"/companies/{cid}/declarations/{declaration_id}")
     labels = await _form_labels(client, d["type"])
     item_data = d.get("itemData") or {}
@@ -560,7 +554,6 @@ async def get_declaration(
 @mcp.tool(annotations=READ)
 async def get_company_summary(
     accounting_year_id: YearId = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Return the accountant's summary of the company for one year.
 
@@ -568,7 +561,7 @@ async def get_company_summary(
     activity, and the Kbis and bylaws files.
     """
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     year_id = await _year_id(client, cid, accounting_year_id)
     s = await client.get(f"/companies/{cid}/accounting-years/{year_id}/company-summary")
     return compact(

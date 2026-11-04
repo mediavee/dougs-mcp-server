@@ -5,7 +5,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from .server import READ, CompanyId, compact, get_client, mcp
+from .server import READ, compact, get_client, mcp
 
 APP_URL = "https://app.dougs.fr"
 
@@ -33,8 +33,8 @@ def _day(value: str | None) -> str | None:
 
 @mcp.tool(annotations=READ)
 async def get_account() -> dict[str, Any]:
-    """Return who is logged in and the companies they can act on, with the default one tools use
-    when company_id is omitted. Call get_company for a company's accounting settings."""
+    """Return who is logged in and the companies they can act on; every tool acts on the one
+    flagged `isDefault` (switch with select_company). get_company gives its settings."""
     client = get_client()
     me, companies, default_id = await asyncio.gather(
         client.get("/users/me"),
@@ -65,12 +65,27 @@ async def get_account() -> dict[str, Any]:
     )
 
 
+# Changes which company the session acts on, not any data.
 @mcp.tool(annotations=READ)
-async def get_company(company_id: CompanyId = None) -> dict[str, Any]:
+async def select_company(
+    company_id: Annotated[int, Field(description="A company id from get_account.")],
+) -> dict[str, Any]:
+    """Switch the company every other tool acts on, for the rest of the session."""
+    client = get_client()
+    companies = await client.get("/users/me/companies")
+    known = {c.get("id"): c.get("fullName") for c in companies or []}
+    if company_id not in known:
+        raise ValueError(f"company {company_id} is not accessible; get_account lists {list(known)}")
+    client.select_company(company_id)
+    return {"companyId": company_id, "name": known[company_id]}
+
+
+@mcp.tool(annotations=READ)
+async def get_company() -> dict[str, Any]:
     """Return a company's identity and accounting settings: legal form, SIREN, activity, VAT
     regime and periodicity, tax regime, current fiscal year, lock date and Dougs plan."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     c = await client.get(f"/companies/{cid}")
     vat = c.get("vatConfiguration") or {}
     vat_since = next(
@@ -142,11 +157,11 @@ async def get_company(company_id: CompanyId = None) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ)
-async def list_company_people(company_id: CompanyId = None) -> list[dict[str, Any]]:
+async def list_company_people() -> list[dict[str, Any]]:
     """List the people and companies holding a role in the company: officers (gérant,
     président), associates with their shares, and employees, with each role's dates."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     partners = await client.get(f"/companies/{cid}/partners")
     rows = []
     for p in partners:
@@ -183,13 +198,12 @@ async def list_bank_accounts(
     include_hidden: Annotated[
         bool, Field(description="Also return accounts hidden in the app.")
     ] = False,
-    company_id: CompanyId = None,
 ) -> list[dict[str, Any]]:
     """List the company's bank and treasury accounts (Qonto, PayPal, Stripe…) with their balance.
     `filterValue` goes to list_operations(treasury_account_id=...); list_bank_connections tells
     whether their synchronization works."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     accounts = await client.get(f"/companies/{cid}/treasury-accounts")
     return [
         compact(
@@ -213,12 +227,12 @@ async def list_bank_accounts(
 
 
 @mcp.tool(annotations=READ)
-async def list_bank_connections(company_id: CompanyId = None) -> list[dict[str, Any]]:
+async def list_bank_connections() -> list[dict[str, Any]]:
     """Report the health of each bank connection: status, the action the bank asks for (such as
     a strong authentication), when it last fetched data and imported transactions, and its
     accounts. Re-authenticating or forcing a sync stays a step in the Dougs app."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     connections, accounts = await asyncio.gather(
         client.get(f"/companies/{cid}/connections"),
         client.get(f"/companies/{cid}/accounts"),
@@ -267,12 +281,12 @@ async def list_bank_connections(company_id: CompanyId = None) -> list[dict[str, 
 
 
 @mcp.tool(annotations=READ)
-async def list_customer_todos(company_id: CompanyId = None) -> list[dict[str, Any]]:
+async def list_customer_todos() -> list[dict[str, Any]]:
     """List what Dougs is waiting for from the customer (documents to attach, a VAT return to
     complete, an account to regularize), with due dates and whether each is overdue. Completing
     or ignoring an item stays a step in the Dougs app."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     todos, tasks = await asyncio.gather(
         client.get(f"/companies/{cid}/customer-todo"),
         client.get(f"/companies/{cid}/customer-tasks"),
@@ -339,12 +353,11 @@ async def list_billing_invoices(
     unpaid_only: Annotated[bool, Field(description="Only invoices not paid yet.")] = False,
     limit: Annotated[int, Field(ge=1, le=100, description="Invoices per page, newest first.")] = 12,
     offset: Annotated[int, Field(ge=0, description="Invoices to skip, for the next page.")] = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List the invoices Dougs bills the company for its subscription, newest first, with the
     upcoming one and the plan. Pass an invoice's `filePath` to get_file_url to download its PDF."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     invoices, pending, company = await asyncio.gather(
         client.get(f"/companies/{cid}/billing-invoices"),
         client.get(f"/companies/{cid}/billing-invoices/pending"),

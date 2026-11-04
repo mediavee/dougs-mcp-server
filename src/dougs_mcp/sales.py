@@ -9,18 +9,12 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from .client import DougsClient
-from .server import DESTRUCTIVE, READ, WRITE, CompanyId, compact, get_client, mcp
+from .server import DESTRUCTIVE, READ, WRITE, compact, get_client, mcp
 
 Limit = Annotated[int, Field(ge=1, le=100, description="Rows per page.")]
 Offset = Annotated[int, Field(ge=0, description="Rows to skip, for the next page.")]
 Search = Annotated[str, Field(description="Free-text search, e.g. a client name.")]
-Customer = Annotated[
-    str,
-    Field(
-        min_length=1,
-        description="Customer id, SIREN or name (list_customers), or any French company's SIREN.",
-    ),
-]
+CUSTOMER_HELP = "Customer id, SIREN or name (list_customers), or any French company's SIREN."
 IsoDate = Annotated[str, Field(description="ISO date 'YYYY-MM-DD'; default: today.")]
 Subject = Annotated[str, Field(description="Subject printed on the document.")]
 
@@ -57,12 +51,11 @@ async def list_sales_invoices(
     search: Search = "",
     limit: Limit = 20,
     offset: Offset = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List finalized sales invoices, newest first: number, client, amounts, payment status and
     the bank operations they are matched to. Drafts are in list_sales_invoice_drafts."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     if payment_status:
         params["paymentStatus"] = payment_status
@@ -101,12 +94,11 @@ async def get_sales_overview(
         int | None,
         Field(description="Year for the revenue figures (list_accounting_years); default: active."),
     ] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Sales dashboard: invoice and quote counts, issued/waiting/late amounts, receivables aging,
     and the year's net revenue by month and by client."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     year_id = accounting_year_id or await client.active_accounting_year_id(cid)
     base = f"/companies/{cid}"
     year = {"accountingYearId": year_id}
@@ -252,7 +244,7 @@ async def _resolve_client(client: DougsClient, cid: int, customer: str) -> dict[
     raise ValueError(
         f"customer '{customer}' is not a registered customer. Pass a SIREN"
         + (f"; companies with that name: {found[:10]}" if found else "")
-        + ", or register it with create_customer."
+        + ", or register it with save_customer."
     )
 
 
@@ -262,11 +254,10 @@ async def list_customers(
     include_archived: Annotated[bool, Field(description="Also list archived customers.")] = False,
     limit: Limit = 50,
     offset: Offset = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List registered customers (the address book used for invoices and quotes)."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     params: dict[str, Any] = {
         "limit": limit,
         "offset": offset,
@@ -320,39 +311,16 @@ def _customer_fields(**fields: Any) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=WRITE)
-async def create_customer(
-    business: Annotated[bool, Field(description="True for a company, False for a person.")],
-    company_name: Annotated[str, Field(description="Required for a company.")] = "",
-    first_name: Annotated[str, Field(description="Required for a person.")] = "",
-    last_name: Annotated[str, Field(description="Required for a person.")] = "",
-    siren: Siren = "",
-    vat_number: VatNumber = "",
-    street: Street = "",
-    zipcode: Zipcode = "",
-    city: City = "",
-    country: Country = "",
-    email: Email = "",
-    phone: Phone = "",
-    company_id: CompanyId = None,
-) -> dict[str, Any]:
-    """Register a customer so invoices and quotes can be addressed to it."""
-    if business and not company_name:
-        raise ValueError("a business customer needs company_name")
-    if not business and not (first_name and last_name):
-        raise ValueError("a person needs first_name and last_name")
-    payload = _customer_fields(**locals())
-    client = get_client()
-    cid = await client.resolve_company_id(company_id)
-    created = await client.post(f"/companies/{cid}/customers", json=payload)
-    return _customer_row(created)
-
-
-@mcp.tool(annotations=WRITE)
-async def update_customer(
-    customer_id: Annotated[int, Field(description="Customer id from list_customers.")],
-    company_name: Annotated[str, Field(description="Company name.")] = "",
-    first_name: Annotated[str, Field(description="First name.")] = "",
-    last_name: Annotated[str, Field(description="Last name.")] = "",
+async def save_customer(
+    customer_id: Annotated[
+        int | None, Field(description="Customer to change (list_customers); omit to create one.")
+    ] = None,
+    business: Annotated[
+        bool | None, Field(description="Creation: True for a company, False for a person.")
+    ] = None,
+    company_name: Annotated[str, Field(description="Required to create a company.")] = "",
+    first_name: Annotated[str, Field(description="Required to create a person.")] = "",
+    last_name: Annotated[str, Field(description="Required to create a person.")] = "",
     siren: Siren = "",
     vat_number: VatNumber = "",
     street: Street = "",
@@ -362,30 +330,35 @@ async def update_customer(
     email: Email = "",
     phone: Phone = "",
     archived: Annotated[bool | None, Field(description="Archive or restore it.")] = None,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
-    """Change a registered customer; only the arguments you pass change. Documents already
+    """Create a customer, or change one (only the arguments passed change). Documents already
     issued keep the client details they were made with."""
-    changes = _customer_fields(**locals())
+    fields = _customer_fields(**locals())
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
+    if customer_id is None:
+        if business is None:
+            raise ValueError("creating a customer needs business=True (company) or False (person)")
+        if business and not company_name:
+            raise ValueError("a business customer needs company_name")
+        if not business and not (first_name and last_name):
+            raise ValueError("a person needs first_name and last_name")
+        return _customer_row(await client.post(f"/companies/{cid}/customers", json=fields))
     path = f"/companies/{cid}/customers/{customer_id}"
     current = await client.get(path)
-    if "address" in changes:
-        changes["address"] = {**(current.get("address") or {}), **changes["address"]}
-    updated = await client.post(path, json={**current, **changes})
-    return _customer_row(updated)
+    if "address" in fields:
+        fields["address"] = {**(current.get("address") or {}), **fields["address"]}
+    return _customer_row(await client.post(path, json={**current, **fields}))
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
 async def delete_customer(
     customer_id: Annotated[int, Field(description="Customer id from list_customers.")],
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """Delete a registered customer. To keep it out of lists without deleting it, archive it
-    with update_customer."""
+    with save_customer."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     await client.delete(f"/companies/{cid}/customers/{customer_id}")
     return {"deleted": customer_id}
 
@@ -406,7 +379,9 @@ class InvoiceLine(BaseModel):
     discount: float = Field(0, ge=0, le=100, description="Percentage.")
 
 
-Lines = Annotated[list[InvoiceLine], Field(min_length=1, description="Replaces all lines.")]
+Lines = Annotated[
+    list[InvoiceLine], Field(min_length=1, description="All the lines; replaces existing ones.")
+]
 
 
 def _line(line: InvoiceLine) -> dict[str, Any]:
@@ -495,8 +470,6 @@ def _apply_dates(
         )
 
 
-DueInDays = Annotated[int, Field(ge=0, description="Payment delay in days; 0 = immediate.")]
-ValidForDays = Annotated[int, Field(ge=0, description="Validity in days.")]
 DraftId = Annotated[UUID, Field(description="Invoice draft id from list_sales_invoice_drafts.")]
 QuoteDate = Annotated[str, Field(description="ISO date 'YYYY-MM-DD', not after today.")]
 QuoteDraftId = Annotated[UUID, Field(description="Quote draft id from list_quotes.")]
@@ -546,12 +519,12 @@ async def _edit_draft(
 
 @mcp.tool(annotations=READ)
 async def list_sales_invoice_drafts(
-    search: Search = "", limit: Limit = 20, offset: Offset = 0, company_id: CompanyId = None
+    search: Search = "", limit: Limit = 20, offset: Offset = 0
 ) -> dict[str, Any]:
     """List sales invoice drafts (not finalized) with client, dates and totals; read the lines
     with get_sales_invoice_draft."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     if search:
         params["search"] = search
@@ -560,29 +533,40 @@ async def list_sales_invoice_drafts(
 
 
 @mcp.tool(annotations=READ)
-async def get_sales_invoice_draft(
-    draft_id: DraftId, company_id: CompanyId = None
-) -> dict[str, Any]:
+async def get_sales_invoice_draft(draft_id: DraftId) -> dict[str, Any]:
     """Read a sales invoice draft: client, dates, lines, totals and its app URL."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     draft = await client.get(f"/companies/{cid}/sales-invoices-drafts/{draft_id}")
     return _document(client, cid, draft, "sales-invoice")
 
 
 @mcp.tool(annotations=WRITE)
-async def create_sales_invoice_draft(
-    customer: Customer,
-    lines: Lines,
+async def save_sales_invoice_draft(
+    draft_id: Annotated[
+        UUID | None, Field(description="Draft to change; omit to create one.")
+    ] = None,
+    customer: Annotated[str, Field(description=CUSTOMER_HELP + " Required to create.")] = "",
+    lines: Lines | None = None,
     invoice_date: IsoDate = "",
-    due_in_days: DueInDays = 30,
+    due_in_days: Annotated[
+        int | None, Field(ge=0, description="Payment delay in days; 30 on creation.")
+    ] = None,
     subject: Subject = "",
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
-    """Create a sales invoice draft; Dougs computes the totals. It is never finalized nor sent:
-    review and finalize it in the app (returned url)."""
+    """Create a sales invoice draft, or change one (only the arguments passed change; a new date
+    or delay recomputes the due date). Dougs computes the totals. A draft is never finalized
+    nor sent: that stays in the app (returned url)."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
+    if draft_id is not None:
+        client_data = await _resolve_client(client, cid, customer) if customer else None
+        saved = await _edit_draft(
+            client, cid, "invoice", draft_id, client_data, lines, invoice_date, due_in_days, subject
+        )
+        return _document(client, cid, saved, "sales-invoice")
+    if not customer or not lines:
+        raise ValueError("creating a draft needs customer and lines")
     # Resolve the customer first, so a bad one leaves no empty draft behind.
     client_data = await _resolve_client(client, cid, customer)
     created = await client.post(f"/companies/{cid}/sales-invoices-drafts", json={})
@@ -596,7 +580,7 @@ async def create_sales_invoice_draft(
             client_data,
             lines,
             invoice_date or date.today().isoformat(),
-            due_in_days,
+            30 if due_in_days is None else due_in_days,
             subject,
         )
     except Exception:
@@ -606,36 +590,11 @@ async def create_sales_invoice_draft(
     return _document(client, cid, saved, "sales-invoice")
 
 
-@mcp.tool(annotations=WRITE)
-async def update_sales_invoice_draft(
-    draft_id: DraftId,
-    customer: Annotated[str, Field(description="New client, as in create.")] = "",
-    lines: Lines | None = None,
-    invoice_date: Annotated[str, Field(description="ISO date 'YYYY-MM-DD'.")] = "",
-    due_in_days: Annotated[
-        int | None, Field(ge=0, description="New payment delay in days.")
-    ] = None,
-    subject: Subject = "",
-    company_id: CompanyId = None,
-) -> dict[str, Any]:
-    """Change a sales invoice draft; only the arguments you pass change, and a new date or delay
-    recomputes the due date."""
-    client = get_client()
-    cid = await client.resolve_company_id(company_id)
-    client_data = await _resolve_client(client, cid, customer) if customer else None
-    saved = await _edit_draft(
-        client, cid, "invoice", draft_id, client_data, lines, invoice_date, due_in_days, subject
-    )
-    return _document(client, cid, saved, "sales-invoice")
-
-
 @mcp.tool(annotations=DESTRUCTIVE)
-async def delete_sales_invoice_draft(
-    draft_id: DraftId, company_id: CompanyId = None
-) -> dict[str, Any]:
+async def delete_sales_invoice_draft(draft_id: DraftId) -> dict[str, Any]:
     """Delete a sales invoice draft. Finalized invoices cannot be deleted here."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     path = f"/companies/{cid}/sales-invoices-drafts/{draft_id}"
     await client.get(path)  # 404s unless this id is an existing draft
     await client.delete(path)
@@ -651,12 +610,11 @@ async def list_quotes(
     search: Search = "",
     limit: Limit = 20,
     offset: Offset = 0,
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
     """List quotes (devis), drafts included, newest first: number, status, client, dates and
     totals. Read a draft's lines with get_quote_draft."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     # Drafts and issued quotes are two endpoints; fetch enough of each to cut one page.
     params: dict[str, Any] = {"limit": offset + limit, "offset": 0}
     if search:
@@ -674,27 +632,40 @@ async def list_quotes(
 
 
 @mcp.tool(annotations=READ)
-async def get_quote_draft(quote_id: QuoteDraftId, company_id: CompanyId = None) -> dict[str, Any]:
+async def get_quote_draft(quote_id: QuoteDraftId) -> dict[str, Any]:
     """Read a quote draft: client, dates, lines, totals and its app URL."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     quote = await client.get(f"/companies/{cid}/invoicing/quote-drafts/{quote_id}")
     return _document(client, cid, quote, "quote")
 
 
 @mcp.tool(annotations=WRITE)
-async def create_quote_draft(
-    customer: Customer,
-    lines: Lines,
+async def save_quote_draft(
+    quote_id: Annotated[
+        UUID | None, Field(description="Quote draft to change; omit to create one.")
+    ] = None,
+    customer: Annotated[str, Field(description=CUSTOMER_HELP + " Required to create.")] = "",
+    lines: Lines | None = None,
     quote_date: QuoteDate = "",
-    valid_for_days: ValidForDays = 30,
+    valid_for_days: Annotated[
+        int | None, Field(ge=0, description="Validity in days; 30 on creation.")
+    ] = None,
     subject: Subject = "",
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
-    """Create a quote (devis) draft; Dougs computes the totals. It is never finalized nor sent:
-    review and finalize it in the app (returned url)."""
+    """Create a quote (devis) draft, or change one (only the arguments passed change; a new date
+    or validity recomputes the expiration). Dougs computes the totals. A draft is never
+    finalized nor sent: that stays in the app (returned url)."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
+    if quote_id is not None:
+        client_data = await _resolve_client(client, cid, customer) if customer else None
+        saved = await _edit_draft(
+            client, cid, "quote", quote_id, client_data, lines, quote_date, valid_for_days, subject
+        )
+        return _document(client, cid, saved, "quote")
+    if not customer or not lines:
+        raise ValueError("creating a quote draft needs customer and lines")
     client_data = await _resolve_client(client, cid, customer)
     created = await client.post(f"/companies/{cid}/invoicing/quote-drafts", json={})
     draft_path = f"/companies/{cid}/invoicing/quote-drafts/{created['id']}"
@@ -707,7 +678,7 @@ async def create_quote_draft(
             client_data,
             lines,
             quote_date or date.today().isoformat(),
-            valid_for_days,
+            30 if valid_for_days is None else valid_for_days,
             subject,
         )
     except Exception:
@@ -717,34 +688,11 @@ async def create_quote_draft(
     return _document(client, cid, saved, "quote")
 
 
-@mcp.tool(annotations=WRITE)
-async def update_quote_draft(
-    quote_id: QuoteDraftId,
-    customer: Annotated[str, Field(description="New client, as in create.")] = "",
-    lines: Lines | None = None,
-    quote_date: QuoteDate = "",
-    valid_for_days: Annotated[int | None, Field(ge=0, description="New validity in days.")] = None,
-    subject: Subject = "",
-    company_id: CompanyId = None,
-) -> dict[str, Any]:
-    """Change a quote draft; only the arguments you pass change, and a new date or validity
-    recomputes the expiration date."""
-    client = get_client()
-    cid = await client.resolve_company_id(company_id)
-    client_data = await _resolve_client(client, cid, customer) if customer else None
-    saved = await _edit_draft(
-        client, cid, "quote", quote_id, client_data, lines, quote_date, valid_for_days, subject
-    )
-    return _document(client, cid, saved, "quote")
-
-
 @mcp.tool(annotations=DESTRUCTIVE)
-async def delete_quote_draft(
-    quote_id: QuoteDraftId, company_id: CompanyId = None
-) -> dict[str, Any]:
+async def delete_quote_draft(quote_id: QuoteDraftId) -> dict[str, Any]:
     """Delete a quote draft. Issued quotes cannot be deleted here."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     path = f"/companies/{cid}/invoicing/quote-drafts/{quote_id}"
     await client.get(path)  # 404s unless this id is an existing draft
     await client.delete(path)
@@ -776,12 +724,12 @@ ProductReference = Annotated[str, Field(description="Your product code.")]
 
 @mcp.tool(annotations=READ)
 async def list_invoice_products(
-    search: Search = "", limit: Limit = 50, offset: Offset = 0, company_id: CompanyId = None
+    search: Search = "", limit: Limit = 50, offset: Offset = 0
 ) -> dict[str, Any]:
     """List the company's saved products and services, with their unit price and VAT rate, to
     reuse as invoice or quote lines."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     products = await client.get(
         f"/companies/{cid}/invoice-products",
         params={"search": search, "sortBy": "title", "limit": limit, "offset": offset},
@@ -790,51 +738,27 @@ async def list_invoice_products(
 
 
 @mcp.tool(annotations=WRITE)
-async def create_invoice_product(
-    title: Annotated[str, Field(max_length=255, description="Name printed on the line.")],
-    unit_amount: Annotated[float, Field(ge=0, description="Unit price, excluding VAT.")],
-    unit: ProductUnit = "unité",
-    vat_rate: Annotated[float, Field(ge=0, le=1, description="0.2 = 20 %, 0 = exempt.")] = 0.2,
+async def save_invoice_product(
+    product_id: Annotated[
+        UUID | None, Field(description="Product to change; omit to create one.")
+    ] = None,
+    title: Annotated[
+        str, Field(max_length=255, description="Name printed on the line; required to create.")
+    ] = "",
+    unit_amount: Annotated[
+        float | None, Field(ge=0, description="Unit price excl. VAT; required to create.")
+    ] = None,
+    unit: ProductUnit = "",
+    vat_rate: Annotated[
+        float | None, Field(ge=0, le=1, description="0.2 = 20 % (default), 0 = exempt.")
+    ] = None,
     description: Annotated[str, Field(description="Detail printed under the title.")] = "",
     reference: ProductReference = "",
-    company_id: CompanyId = None,
 ) -> dict[str, Any]:
-    """Save a product or service to reuse on invoices and quotes."""
+    """Save a product or service to reuse on invoices and quotes, or change one (only the
+    arguments passed change)."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
-    created = await client.post(
-        f"/companies/{cid}/invoice-products",
-        json={
-            "title": title,
-            "amount": unit_amount,
-            "unit": unit,
-            "vatRate": vat_rate,
-            "description": description,
-            "reference": reference or None,
-        },
-    )
-    return _product_row(created)
-
-
-@mcp.tool(annotations=WRITE)
-async def update_invoice_product(
-    product_id: ProductId,
-    title: Annotated[str, Field(max_length=255, description="New name.")] = "",
-    unit_amount: Annotated[float | None, Field(ge=0, description="Unit price, excl. VAT.")] = None,
-    unit: ProductUnit = "",
-    vat_rate: ProductVat = None,
-    description: Annotated[str, Field(description="New detail text.")] = "",
-    reference: ProductReference = "",
-    company_id: CompanyId = None,
-) -> dict[str, Any]:
-    """Change a saved product; only the arguments you pass change."""
-    client = get_client()
-    cid = await client.resolve_company_id(company_id)
-    # The API has no single-product GET: find it in the list.
-    products = await client.get(f"/companies/{cid}/invoice-products", params={"search": ""})
-    current = next((p for p in products or [] if p.get("id") == str(product_id)), None)
-    if current is None:
-        raise ValueError(f"no product {product_id}; see list_invoice_products")
+    cid = await client.resolve_company_id()
     changes = {
         "title": title,
         "amount": unit_amount,
@@ -843,18 +767,31 @@ async def update_invoice_product(
         "description": description,
         "reference": reference,
     }
+    if product_id is None:
+        if not title or unit_amount is None:
+            raise ValueError("creating a product needs title and unit_amount")
+        payload = {
+            **changes,
+            "unit": unit or "unité",
+            "vatRate": 0.2 if vat_rate is None else vat_rate,
+            "reference": reference or None,
+        }
+        return _product_row(await client.post(f"/companies/{cid}/invoice-products", json=payload))
+    # The API has no single-product GET: find it in the list.
+    products = await client.get(f"/companies/{cid}/invoice-products", params={"search": ""})
+    current = next((p for p in products or [] if p.get("id") == str(product_id)), None)
+    if current is None:
+        raise ValueError(f"no product {product_id}; see list_invoice_products")
     current.update({k: v for k, v in changes.items() if v not in (None, "")})
     updated = await client.post(f"/companies/{cid}/invoice-products/{product_id}", json=current)
     return _product_row(updated)
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-async def delete_invoice_product(
-    product_id: ProductId, company_id: CompanyId = None
-) -> dict[str, Any]:
+async def delete_invoice_product(product_id: ProductId) -> dict[str, Any]:
     """Delete a saved product. Invoices and quotes that used it keep their lines."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     await client.delete(f"/companies/{cid}/invoice-products/{product_id}")
     return {"deleted": str(product_id)}
 
@@ -863,11 +800,11 @@ async def delete_invoice_product(
 
 
 @mcp.tool(annotations=READ)
-async def list_sales_channels(company_id: CompanyId = None) -> list[dict[str, Any]]:
+async def list_sales_channels() -> list[dict[str, Any]]:
     """List the sales channels declared to Dougs (website, marketplace, shop...) and the payment
     processors attached to each."""
     client = get_client()
-    cid = await client.resolve_company_id(company_id)
+    cid = await client.resolve_company_id()
     channels = await client.get(f"/companies/{cid}/salesChannels")
     return [
         compact(
