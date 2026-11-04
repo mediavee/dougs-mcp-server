@@ -1,60 +1,127 @@
 # dougs-mcp
 
-MCP server for [Dougs](https://www.dougs.fr) online accounting: an MCP client (Claude Code,
-Claude Desktop, Hermes…) reads and works on your accounting through the private API the Dougs web
-app uses (`app.dougs.fr`).
+[![CI](https://github.com/mediavee/dougs-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/mediavee/dougs-mcp-server/actions/workflows/ci.yml)
+[![Licence : MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
-> **Unofficial.** It logs in with your own credentials and may break when Dougs changes its
-> backend. Dougs now offers an official MCP for the Claude and ChatGPT apps; this server covers
-> what that one refuses on purpose: unattended use from scripts, CLIs and self-hosted agents.
+Confiez votre comptabilité [Dougs](https://www.dougs.fr) à un agent IA : catégoriser les
+opérations bancaires, rattacher les justificatifs, préparer et envoyer les factures, suivre la TVA
+et les déclarations.
 
-## How it works
+> [!WARNING]
+> **Non officiel.** Ce serveur passe par l'API privée de l'application web Dougs, avec vos
+> propres identifiants, et peut casser quand Dougs la modifie. Le MCP officiel de Dougs sert les
+> applications Claude et ChatGPT ; celui-ci vise l'usage sans surveillance : Claude Code, scripts,
+> agents auto-hébergés.
 
-- **Auth**: `POST /auth/api/login` with your email and password. The session cookie is cached
-  under `~/.cache/dougs-mcp/` (mode `600`) and reused across restarts, since Dougs allows 25
-  logins per hour and per account, then renewed on a `401`.
-- **MFA**: when the account has two-factor authentication, the server answers it with a TOTP
-  code computed from `DOUGS_TOTP_SECRET`. Enable the **authenticator app** factor in Dougs (an
-  account with only the email factor cannot log in unattended) and paste its secret.
-- **Company**: tools act on your preferred company, or on `DOUGS_COMPANY_ID`; `select_company`
-  switches for the rest of the session.
-- **Answers** are compact views, not raw payloads: lists are paginated and filtered, and point to
-  the tool that gives the detail.
-- **Coverage**: what a customer can do in the app, irreversible actions included (finalizing and
-  sending invoices, filing a tax return, syncing a bank). Accountant-only endpoints are left out.
+## Ce que vous pouvez demander
 
-## Requirements
+- *« Quelles opérations d'octobre n'ont pas encore de justificatif ? »*
+- *« Catégorise les paiements OVH en hébergement et valide-les. »*
+- *« Prépare une facture à ACME pour 5 jours de développement à 600 € HT. »*
+- *« Comment ont évolué le chiffre d'affaires et les charges sur trois ans ? »*
+- *« Qu'est-ce que Dougs attend de moi, et ma synchro bancaire fonctionne-t-elle ? »*
 
-- Python ≥ 3.13
-- [uv](https://docs.astral.sh/uv/)
+Tout ce qu'un client peut faire dans l'application Dougs est un outil (79), actions
+irréversibles comprises. Les réponses sont des vues compactes, calibrées pour le contexte d'un
+agent, pas les payloads bruts de l'API.
 
-## Setup
+## Démarrage rapide
+
+Il faut Python ≥ 3.13 et [uv](https://docs.astral.sh/uv/).
 
 ```bash
+git clone https://github.com/mediavee/dougs-mcp-server && cd dougs-mcp-server
 uv sync
-cp .env.example .env   # then fill in your credentials
+cp .env.example .env
 ```
 
+Remplissez `.env` :
+
+```bash
+DOUGS_EMAIL=vous@exemple.fr
+DOUGS_PASSWORD=votre-mot-de-passe
+DOUGS_TOTP_SECRET=JBSWY3DPEHPK3PXP   # si le compte a la double authentification (voir plus bas)
+# DOUGS_COMPANY_ID=12345             # facultatif ; par défaut, votre société préférée
 ```
-DOUGS_EMAIL=you@example.com
-DOUGS_PASSWORD=your-password
-# DOUGS_TOTP_SECRET=JBSWY3DPEHPK3PXP   # required if MFA is on; base32 secret or otpauth:// URI
-# DOUGS_COMPANY_ID=12345               # optional; defaults to your preferred company
+
+Puis déclarez le serveur dans votre client MCP.
+
+**Claude Code**
+
+```bash
+claude mcp add dougs -- uv --directory /chemin/absolu/vers/dougs-mcp-server run dougs-mcp
 ```
 
-`DOUGS_TOTP_SECRET` is the `secret` parameter of the `otpauth://` link Dougs shows when you set up
-the authenticator app (the whole link works too). Next to the password it is a second key to the
-account: keep `.env` private.
+**Claude Desktop** (`claude_desktop_config.json`)
 
-## Tools
+```json
+{
+  "mcpServers": {
+    "dougs": {
+      "command": "uv",
+      "args": ["--directory", "/chemin/absolu/vers/dougs-mcp-server", "run", "dougs-mcp"]
+    }
+  }
+}
+```
 
-✏️ changes data, ⚠️ is irreversible or deletes data, 📤 is irreversible and reaches a third
-party (an email, a tax filing, the accountant); the others only read. MCP clients ask before the
-last two from the tool annotations.
+**Hermes** (`~/.hermes/config.yaml`)
 
-### Account and company
+```yaml
+mcp_servers:
+  dougs:
+    command: /chemin/absolu/vers/dougs-mcp-server/.venv/bin/dougs-mcp
+    cwd: /chemin/absolu/vers/dougs-mcp-server
+    trust: untrusted
+```
 
-| Tool | What it does |
+Deux choix y comptent :
+- **`.venv/bin/dougs-mcp` plutôt que `uv run`** : `uv run` garde le verrou du cache de uv tant que
+  le serveur tourne, et `uv cache prune` ne passe plus.
+- **`trust: untrusted`** : Hermes demande alors une validation avant chaque appel qui n'est pas en
+  lecture seule. Gardez-le.
+
+Ensuite, liez le serveur aux plateformes voulues dans `platform_toolsets`. Hermes ne relance pas
+`uv sync` : refaites-le après chaque mise à jour.
+
+**Autre client** : lancez `.venv/bin/dougs-mcp` en stdio, avec le dossier du repo comme
+répertoire de travail (le chemin de `.env` est relatif).
+
+### Double authentification
+
+Dougs peut demander un second facteur à la connexion. Sans surveillance, il faut le facteur
+**application d'authentification** : activez-le dans Dougs, puis mettez dans `DOUGS_TOTP_SECRET`
+le paramètre `secret` du lien `otpauth://` affiché (ou le lien entier). Un compte qui n'a que le
+facteur e-mail ne peut pas se connecter sans vous. Avec le mot de passe, ce secret est une
+seconde clé du compte : gardez `.env` privé.
+
+## Sécurité
+
+Chaque outil porte des annotations MCP, et c'est votre client qui décide de ce qui demande votre
+accord :
+
+| Marque | Signification | Exemples |
+|---|---|---|
+| | Lecture seule | `list_operations`, `get_declaration` |
+| ✏️ | Modifie, réversible | `save_sales_invoice_draft`, `validate_operation` |
+| ⚠️ | Irréversible ou supprime | `finalize_sales_document`, `delete_vendor_invoice` |
+| 📤 | Irréversible et touche un tiers | `send_sales_document`, `confirm_declaration` |
+
+Laissez votre client demander avant les appels ⚠️ et 📤 : Claude Code demande avant tout appel
+MCP que vous n'avez pas autorisé, et Hermes avant chaque écriture avec `trust: untrusted`. Les
+outils irréversibles refont aussi les contrôles de l'application avant d'agir :
+`finalize_sales_document` lance d'abord la vérification de Dougs, `confirm_declaration` refuse
+tant que la déclaration a des erreurs ou que ses engagements n'ont pas été acceptés.
+
+## Outils
+
+Les outils agissent sur une société par session : `get_account` liste les vôtres,
+`select_company` en change. Les descriptions sont en anglais : c'est ce que lit l'agent.
+
+<details>
+<summary><b>Compte et société</b> (10 outils)</summary>
+
+| Outil | Ce qu'il fait |
 |---|---|
 | `get_account` | Return who is logged in and the companies they can act on; every tool acts on the one flagged `isDefault` (switch with select_company). get_company gives its settings. |
 | `select_company` ✏️ | Switch the company every other tool acts on, for the rest of the session. |
@@ -67,9 +134,12 @@ last two from the tool annotations.
 | `resolve_customer_todo` ⚠️ | Complete, dismiss or reopen a to-do Dougs is waiting on, or dismiss a tip. Dougs reads a completed to-do as the customer's answer; to-dos whose app step asks questions (a consent, a pro space check) are better completed in the app. |
 | `list_billing_invoices` | List the invoices Dougs bills the company for its subscription, newest first, with the upcoming one and the plan. Pass an invoice's `filePath` to get_file_url to download its PDF. |
 
-### Bank operations
+</details>
 
-| Tool | What it does |
+<details>
+<summary><b>Opérations bancaires</b> (19 outils)</summary>
+
+| Outil | Ce qu'il fait |
 |---|---|
 | `list_operations` | Search bank operations, newest first, one compact row each: signed amount (negative = money out), category labels, validation state and whether a receipt is attached. Call get_operation for an operation's lines, VAT, questions and receipts. |
 | `count_operations` | Count the operations matching the filters that are still to validate, need attention, or are validated. Dougs stops counting at 100, reported as "100+". |
@@ -91,9 +161,12 @@ last two from the tool annotations.
 | `add_attachment` ✏️ | Attach a receipt or invoice file to an operation. Dougs files it as a vendor invoice in Purchases and reads its date and amount within a few seconds. |
 | `remove_attachment` ✏️ | Detach a receipt from an operation. The document itself stays in Purchases as a vendor invoice; delete it there if it was attached by mistake. |
 
-### Purchases
+</details>
 
-| Tool | What it does |
+<details>
+<summary><b>Achats</b> (9 outils)</summary>
+
+| Outil | Ce qu'il fait |
 |---|---|
 | `list_vendor_invoices` | List vendor (supplier) invoices, most recent first (undated ones on top), as compact rows. Also returns the total still to pay in EUR across all unpaid invoices. Use get_vendor_invoice for one invoice's detail and file path. |
 | `get_vendor_invoice` | One vendor invoice in detail: supplier, amounts, VAT breakdown, OCR status, refusal, attached and suggested operations, the fields update_vendor_invoice may change, and the file_path to pass to get_file_url. |
@@ -105,9 +178,12 @@ last two from the tool annotations.
 | `set_vendor_invoice_status` 📤 | Mark a vendor invoice paid or unpaid, or refuse an e-invoice. On an e-invoice the status reaches the supplier through the e-invoicing network ('Paiement transmis', or the refusal with its reason). |
 | `move_vendor_invoice_to_sales` ⚠️ | Move an uploaded document filed by mistake under purchases to the sales invoices; it gets a new id there. Dougs refuses to move it back. |
 
-### Sales
+</details>
 
-| Tool | What it does |
+<details>
+<summary><b>Ventes</b> (26 outils)</summary>
+
+| Outil | Ce qu'il fait |
 |---|---|
 | `list_sales_invoices` | List finalized sales invoices, newest first: number, client, amounts, payment status and the bank operations they are matched or suggested to. Drafts are in list_sales_invoice_drafts. |
 | `get_sales_overview` | Sales dashboard: invoice and quote counts, issued/waiting/late amounts, receivables aging, and the year's net revenue by month and by client. |
@@ -136,9 +212,12 @@ last two from the tool annotations.
 | `delete_invoice_product` ⚠️ | Delete a saved product. Invoices and quotes that used it keep their lines. |
 | `list_sales_channels` | List the sales channels declared to Dougs (website, marketplace, shop...) and the payment processors attached to each. |
 
-### Accounting and tax
+</details>
 
-| Tool | What it does |
+<details>
+<summary><b>Comptabilité et fiscalité</b> (13 outils)</summary>
+
+| Outil | Ce qu'il fait |
 |---|---|
 | `list_accounting_years` | List the company's accounting (fiscal) years, the active one flagged `active`. Closed years carry their closing documents (balance sheet, FEC, final print), whose `url` goes to get_file_url. |
 | `get_accounting_stat` | Return an aggregated figure of one accounting year (totals; monthly values on request). Income-statement lines carry a `seriesName` to pass to get_metrics for a multi-year trend. |
@@ -154,64 +233,66 @@ last two from the tool annotations.
 | `run_remote_filing_setup` 📤 | Run Dougs' e-filing (télédéclaration) setup assistant and return each step's status: tax regime, IBAN, then the check of the impots.gouv.fr professional space (up to 12 hours). |
 | `get_company_summary` | Return the accountant's summary of the company for one year. Legal form, tax and VAT regimes with their history, capital, partners and employees, activity, and the Kbis and bylaws files. |
 
-### Files and raw access
+</details>
 
-| Tool | What it does |
+<details>
+<summary><b>Fichiers et accès brut</b> (2 outils)</summary>
+
+| Outil | Ce qu'il fait |
 |---|---|
 | `get_file_url` | Turn a Dougs file path into a signed download URL (public, short-lived). |
 | `raw_get` | Authenticated GET on any Dougs API path, raw JSON back: for what no tool covers yet. |
 
-### Editing an operation
+</details>
 
-Dougs models an operation as accounting lines (breakdowns): the categorized line(s) plus the bank
-counterpart. VAT follows the category, and a category may need answers before the line is
-complete (the VAT exemption reason of a 0 % line, the supplier, the loan…). A typical pass:
+## Parcours courants
 
-1. `get_operation`: the lines, their ids and their open `questions`.
-2. `list_available_categories`: a valid `category_id` for one line.
-3. `set_breakdown_category`: the result shows the recomputed VAT and any new question.
-4. `list_question_options`, then `set_breakdown_association` or `set_breakdown_vat`.
+### Catégoriser une opération
+
+Dougs découpe une opération en lignes (breakdowns) : la ou les lignes catégorisées et la
+contrepartie bancaire. La TVA suit la catégorie, et certaines catégories posent des questions
+avant que la ligne soit complète (motif d'exonération d'une ligne à 0 %, fournisseur, emprunt…).
+
+1. `get_operation` : les lignes, leurs ids et leurs `questions` ouvertes.
+2. `list_available_categories` : un `category_id` valide pour une ligne.
+3. `set_breakdown_category` : la réponse montre la TVA recalculée et les nouvelles questions.
+4. `list_question_options`, puis `set_breakdown_association` ou `set_breakdown_vat`.
 5. `validate_operation`.
 
-`split_operation` replaces an operation's lines when one transaction covers several categories.
+`split_operation` remplace les lignes quand une transaction couvre plusieurs catégories.
 
-### Financial analysis
+### Facturer
 
-`get_accounting_stat` and `get_category_breakdown` work on one fiscal year. For trends across
-years, use the monthly time series:
+1. `save_sales_invoice_draft` avec un client (enregistré, ou toute entreprise française par son
+   SIREN) et des lignes ; Dougs calcule les totaux.
+2. `get_sales_invoice_draft` montre ce qui bloque encore la finalisation (`finalizeProblems`).
+3. `finalize_sales_document`, puis `send_sales_document`.
+
+### Tendances sur plusieurs années
+
+`get_accounting_stat` et `get_category_breakdown` portent sur un exercice. Pour les tendances,
+utilisez les séries mensuelles :
 
 ```
 list_metrics(search="chiffre")
 get_metrics(["chiffre-d-affaires", "charges-d-exploitation"], group="year")
 ```
 
-## Use with Claude Code
+## Fonctionnement
+
+- **Connexion** : e-mail et mot de passe sur `POST /auth/api/login`, plus le code TOTP quand Dougs
+  le demande.
+- **Session** : le cookie est mis en cache dans `~/.cache/dougs-mcp/` (mode `600`) et réutilisé
+  d'un redémarrage à l'autre, car Dougs limite à 25 connexions par heure et par compte ; il est
+  renouvelé sur un `401`.
+- **Périmètre** : les endpoints réservés aux experts-comptables (grand livre, exports) répondent
+  `403` à un compte client et n'ont pas d'outil. `raw_get` atteint tous les autres chemins.
+
+## Développement
 
 ```bash
-claude mcp add dougs -- uv --directory /absolute/path/to/dougs-mcp-server run dougs-mcp
+./scripts/check   # lockfile, ruff, ruff format, mypy et démarrage du serveur ; la CI lance le même
 ```
 
-Credentials are read from the project's `.env` (thanks to `--directory`).
-
-## Use with Claude Desktop
-
-In `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "dougs": {
-      "command": "uv",
-      "args": ["--directory", "/absolute/path/to/dougs-mcp-server", "run", "dougs-mcp"]
-    }
-  }
-}
-```
-
-## Development
-
-```bash
-./scripts/check   # lockfile, ruff, mypy, and a boot of the server; CI runs the same
-```
-
-`AGENTS.md` holds the tool design rules.
+[`AGENTS.md`](AGENTS.md) contient les règles de conception des outils : lisez-le avant d'en
+ajouter un. Les payloads sont vérifiés sur un vrai compte, jamais devinés.
