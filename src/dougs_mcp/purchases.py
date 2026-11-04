@@ -313,7 +313,7 @@ async def attach_vendor_invoice(
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-async def review_suggested_operation(
+async def review_vendor_invoice_match(
     invoice_id: InvoiceId,
     action: Annotated[
         Literal["accept", "reject"],

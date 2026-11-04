@@ -389,6 +389,18 @@ async def list_customer_todos() -> list[dict[str, Any]]:
     return rows
 
 
+# The app asks for a signature, a mandate or a reason of its own before closing these.
+_APP_ONLY_TODOS = {
+    "customer:acceptPdpMandate",
+    "customer:signYousignDocument",
+    "customer:switchCurrentPdp",
+    "customer:createPdpUserAccount",
+    "customer:getHintAndCreatePdpUserAccount",
+    "customer:verifyPdpUserIdentity",
+    "customer:signApiFirstMandate",
+}
+
+
 @mcp.tool(annotations=DESTRUCTIVE)
 async def resolve_customer_todo(
     item_id: Annotated[int, Field(description="A to-do or tip id from list_customer_todos.")],
@@ -408,6 +420,16 @@ async def resolve_customer_todo(
     client = get_client()
     cid = await client.resolve_company_id()
     todo = f"/companies/{cid}/customer-todo/{item_id}/actions"
+    if action in ("complete", "ignore"):
+        todos = await client.get(f"/companies/{cid}/customer-todo")
+        item = next((t for t in todos or [] if t.get("id") == item_id), None)
+        if item is None:
+            raise ValueError(f"no to-do {item_id}; see list_customer_todos")
+        if item.get("code") in _APP_ONLY_TODOS:
+            raise ValueError(
+                f"to-do {item_id} ({item['code']}) is a signature, mandate or identity step: "
+                "it needs the Dougs app"
+            )
     if action == "ignore_tip":
         await client.post(f"/companies/{cid}/customer-tip/{item_id}/ignore", json={})
     elif action == "ignore":

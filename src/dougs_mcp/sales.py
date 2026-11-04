@@ -762,8 +762,11 @@ async def finalize_sales_document(
         messages = [p.get("message") for p in problems]
         raise ValueError(f"the draft is not ready: {messages}; complete it with {tool}")
     if document == "invoice":
-        finalized = await client.post(f"{path}/actions/finalize", json={})
-        invoice = await client.get(f"/companies/{cid}/sales-invoices/{finalized['salesInvoiceId']}")
+        finalized = await client.post(f"{path}/actions/finalize", json={}) or {}
+        invoice_id = finalized.get("salesInvoiceId") or finalized.get("id")
+        if not invoice_id:
+            return {"finalized": str(draft_id), "next": "find it with list_sales_invoices"}
+        invoice = await client.get(f"/companies/{cid}/sales-invoices/{invoice_id}")
         return _invoice_url(client, cid, invoice)
     await client.put(f"{path}/actions/finalize", json={})
     quote = await client.get(f"/companies/{cid}/invoicing/quotes/{draft_id}")
@@ -811,7 +814,9 @@ async def send_sales_document(
     doc = await client.get(path)
     if quote and doc.get("status") == "DRAFT":
         raise ValueError("this quote is a draft: finalize it first with finalize_sales_document")
-    if not quote and (doc.get("can") or {}).get("canBeSentByEmail") is False:
+    if not quote and (
+        doc.get("source") != "dougs" or (doc.get("can") or {}).get("canBeSentByEmail") is False
+    ):
         raise ValueError("Dougs cannot email this invoice (only invoices made in Dougs)")
     recipient = recipient or (doc.get("clientData") or {}).get("email") or ""
     if not recipient:
@@ -854,7 +859,9 @@ async def duplicate_sales_document(
     try:
         await client.get(f"{base}/sales-invoices-drafts/{document_id}")
         source = "sales-invoices-drafts"
-    except DougsError:
+    except DougsError as e:
+        if e.status != 404:
+            raise
         source = "sales-invoices"
     copy = await client.post(f"{base}/{source}/{document_id}/actions/duplicate", json={})
     return _document(client, cid, copy, "sales-invoice")
@@ -891,11 +898,14 @@ async def set_sales_invoice_paid(
         "paidAt": _midnight(paid_day) if paid else None,
     }
     allowed = invoice.get("allowedUpdateFields") or []
+    if "paymentStatus" not in allowed:
+        raise ValueError("Dougs does not let this invoice's payment status change")
     updated = await client.post(path, json={k: v for k, v in changes.items() if k in allowed})
     return _invoice_row(updated)
 
 
-@mcp.tool(annotations=WRITE)
+# The API has no call that undoes a rejection.
+@mcp.tool(annotations=DESTRUCTIVE)
 async def review_sales_invoice_match(
     invoice_id: InvoiceId,
     action: Annotated[
@@ -956,9 +966,13 @@ async def set_quote_status(
     """Record a finalized quote as accepted or refused (final), or reopen it as a draft."""
     client = get_client()
     cid = await client.resolve_company_id()
-    quote = await client.put(
-        f"/companies/{cid}/invoicing/quotes/{quote_id}", json={"status": status.upper()}
-    )
+    path = f"/companies/{cid}/invoicing/quotes/{quote_id}"
+    current = (await client.get(path)).get("status")
+    if current == "DRAFT":
+        raise ValueError("this quote is a draft: finalize it first with finalize_sales_document")
+    if status != "draft" and current != "PENDING":
+        raise ValueError(f"only a pending quote can be {status}; this one is {current}")
+    quote = await client.put(path, json={"status": status.upper()})
     return _quote_url(client, cid, quote)
 
 
@@ -968,9 +982,10 @@ async def create_invoice_from_quote(quote_id: QuoteId) -> dict[str, Any]:
     accepted."""
     client = get_client()
     cid = await client.resolve_company_id()
-    draft = await client.post(
-        f"/companies/{cid}/invoicing/quotes/{quote_id}/actions/create-invoice", json={}
-    )
+    path = f"/companies/{cid}/invoicing/quotes/{quote_id}"
+    if (await client.get(path)).get("status") == "DRAFT":
+        raise ValueError("this quote is a draft: finalize it first with finalize_sales_document")
+    draft = await client.post(f"{path}/actions/create-invoice", json={})
     return _document(client, cid, draft, "sales-invoice")
 
 

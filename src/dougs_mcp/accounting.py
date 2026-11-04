@@ -5,9 +5,10 @@ import re
 from datetime import date
 from typing import Annotated, Any, Literal
 
+import httpx
 from pydantic import Field
 
-from .client import DougsClient
+from .client import DougsClient, DougsError, DougsJobError
 from .server import DESTRUCTIVE, READ, SENDS, compact, get_client, mcp
 
 YearId = Annotated[
@@ -613,17 +614,27 @@ async def _check_remote_setup(client: DougsClient, cid: int, form_type: str) -> 
 
 
 @mcp.tool(annotations=SENDS)
-async def confirm_declaration(declaration_id: DeclarationId) -> dict[str, Any]:
+async def confirm_declaration(
+    declaration_id: DeclarationId,
+    statements_accepted: Annotated[
+        bool,
+        Field(
+            description="True only once the user has read and accepted get_declaration's "
+            "`confirmStatements`, which confirming certifies."
+        ),
+    ],
+) -> dict[str, Any]:
     """File a tax return: Dougs teletransmits it to the tax administration with the payment it
-    authorizes, or records a manual deposit as done. Show the user get_declaration's
-    `confirmStatements` first: confirming certifies them."""
+    authorizes, or records a manual deposit as done."""
+    if not statements_accepted:
+        raise ValueError("show the user get_declaration's confirmStatements and get their consent")
     client = get_client()
     cid = await client.resolve_company_id()
     path = f"/companies/{cid}/declarations/{declaration_id}"
     d = await client.get(path)
     if d.get("confirmedAt"):
         raise ValueError(f"already confirmed on {d['confirmedAt'][:10]}; see revise_declaration")
-    if not _can_confirm(d):
+    if not _can_confirm(d) or ((d.get("messages") or {}).get("errorCount") or 0) > 0:
         raise ValueError(
             "Dougs does not accept this filing yet: "
             + ("; ".join(_blockers(d)) or "it is read-only (period not open or not ready)")
@@ -634,7 +645,12 @@ async def confirm_declaration(declaration_id: DeclarationId) -> dict[str, Any]:
     job = await client.post(
         f"{path}/actions/confirm", json={"declaration": {**d, "isAcknowledged": True}}
     )
-    metadata = await client.wait_job(job, max_wait=120)
+    try:
+        metadata = await client.wait_job(job, max_wait=120)
+    except DougsJobError:
+        raise
+    except (DougsError, httpx.HTTPError):
+        metadata = None  # the filing is submitted; only following its job failed
     if metadata is None:
         return {"id": declaration_id, "pending": "still processing; check get_declaration"}
     result = metadata.get("result") or {}
