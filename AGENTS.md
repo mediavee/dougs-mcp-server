@@ -34,9 +34,11 @@ answers fill the context of every call. Design for both.
   100 tokens and a default page under 5 000 tokens; Claude Code truncates a tool answer at 25 000.
   Lists take filters and `limit`/`offset`, and say how to get the rest when they are cut.
 - **Errors**: raise `ValueError` with the fix (valid values, the tool that lists them).
-- **Out of reach on purpose**: finalizing or sending an invoice or a quote, confirming a tax
-  filing, triggering a bank synchronization. These stay a human step in the Dougs app; tools stop
-  at drafts and return the app URL.
+- **Coverage**: everything a customer can do in the Dougs app is a tool, irreversible actions
+  included (finalizing or sending an invoice, confirming a tax filing, a bank sync). Asking for
+  consent is the MCP client's job, driven by the annotations: an irreversible action is
+  `DESTRUCTIVE`, `SENDS` when it also reaches a third party (an email, a filing). Endpoints the
+  API reserves to accountants (403 for a customer) are left out.
 
 `LeanTools` in `server.py` serves every definition with optional arguments flattened and no
 output schema. The catalog is paid by every session: measure its size when you add a tool.
@@ -46,4 +48,6 @@ output schema. The catalog is paid by every session: measure its size when you a
 Payload shapes come from the API, not from guesses: check every new endpoint against a real
 account before wrapping it. Logins are limited to 25 per hour per account; the client caches the
 session under `~/.cache/dougs-mcp/`, so reuse it rather than logging in again. A write test creates
-its own record and deletes it in the same run.
+its own record and deletes it in the same run. An irreversible action is never run for a test:
+its payload comes from the web app's code, and the live check stops at what cannot commit it
+(its dry-run endpoint such as `can-finalize`, or an unknown id answering 404).

@@ -19,6 +19,7 @@ mcp = FastMCP("dougs")
 READ = ToolAnnotations(read_only_hint=True, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
 DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True)
+SENDS = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True)
 
 
 def compact(value: Any) -> Any:
