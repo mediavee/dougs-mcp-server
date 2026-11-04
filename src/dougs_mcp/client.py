@@ -75,6 +75,7 @@ class DougsClient:
         self._catalog_lock = asyncio.Lock()
         self._metrics: dict[int, dict[str, dict[str, Any]]] = {}
         self._metrics_lock = asyncio.Lock()
+        self._default_company_id: int | None = None
         self._session_path = _session_path(settings.dougs_email)
         self._load_session()
 
@@ -87,12 +88,19 @@ class DougsClient:
             cookies = json.loads(self._session_path.read_text())
         except (OSError, ValueError):
             return
-        for name, value in cookies.items():
-            self._http.cookies.set(name, value, domain=".dougs.fr")
+        if not isinstance(cookies, list):  # unknown format: log in again
+            return
+        for c in cookies:
+            self._http.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
         self._authenticated = bool(cookies)
 
     def _save_session(self) -> None:
-        cookies = dict(self._http.cookies)
+        # Keep each cookie's domain and path: restoring them elsewhere would let the
+        # server's fresh cookie sit next to the stale one under the same name.
+        cookies = [
+            {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
+            for c in self._http.cookies.jar
+        ]
         if not cookies:
             return
         try:
@@ -227,6 +235,11 @@ class DougsClient:
             return override
         if self._s.dougs_company_id is not None:
             return self._s.dougs_company_id
+        if self._default_company_id is None:
+            self._default_company_id = await self._fetch_default_company_id()
+        return self._default_company_id
+
+    async def _fetch_default_company_id(self) -> int:
         me = await self.get("/users/me")
         preferred = me.get("preferredCompanyId")
         if preferred:
