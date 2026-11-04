@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -23,11 +24,11 @@ _USER_AGENT = (
 
 
 def _error_detail(resp: httpx.Response) -> str:
-    """Dougs puts a human-readable reason in x-user-message / x-message headers."""
+    """Dougs puts a human-readable, URL-encoded reason in x-user-message / x-message headers."""
     for header in ("x-user-message", "x-message"):
         message = resp.headers.get(header)
         if message:
-            return message
+            return unquote(message)
     return resp.text[:200]
 
 
