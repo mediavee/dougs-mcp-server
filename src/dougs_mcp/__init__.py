@@ -1,5 +1,6 @@
 import logging
 
+from . import accounting, company, operations, purchases, sales  # noqa: F401  (registers tools)
 from .server import mcp
 
 
