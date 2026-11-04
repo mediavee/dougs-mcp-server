@@ -239,6 +239,31 @@ class DougsClient:
         """Authenticated DELETE returning parsed JSON if any."""
         return self._json_or_none(await self._send("DELETE", path))
 
+    async def wait_job(self, job: dict[str, Any], max_wait: float = 60) -> dict[str, Any] | None:
+        """Poll a background job ({"uuid": ...}) until Dougs has handled it; return its metadata.
+
+        Returns None when it is still running after `max_wait` seconds; raises DougsError with the
+        job's user message when it failed.
+        """
+        deadline = asyncio.get_running_loop().time() + max_wait
+        while True:
+            state = await self.get(f"/jobs/{job['uuid']}")
+            if state.get("handledAt"):
+                metadata: dict[str, Any] = state.get("metadata") or {}
+                error = metadata.get("error")
+                if isinstance(metadata.get("result"), dict) and (
+                    metadata["result"].get("__type") == "jobClientError"
+                ):
+                    error = metadata["result"]
+                if error:
+                    raise DougsError(
+                        f"job {job['uuid']} failed: {error.get('userMessage') or error}"
+                    )
+                return metadata
+            if asyncio.get_running_loop().time() > deadline:
+                return None
+            await asyncio.sleep(1)
+
     def select_company(self, company_id: int) -> None:
         """Make company_id the company every later call acts on."""
         self._selected_company_id = company_id
