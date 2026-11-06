@@ -43,6 +43,21 @@ answers fill the context of every call. Design for both.
 `LeanTools` in `server.py` serves every definition with optional arguments flattened and no
 output schema. The catalog is paid by every session: measure its size when you add a tool.
 
+## Releasing
+
+A release is a tag on `main`: the tag's tree is gated, the wheel is built, and the GitHub release
+carries it with notes generated from the commits since the previous tag.
+
+```bash
+uv version 0.2.0                      # bumps pyproject.toml and uv.lock
+git commit -am "chore(release): 0.2.0" && gh pr create --fill && gh pr merge --squash
+git tag -a v0.2.0 -m "Release 0.2.0"
+git push origin v0.2.0                # .github/workflows/release.yml does the rest
+```
+
+`release.yml` refuses a tag that disagrees with `pyproject.toml`. PRs are squash-merged, so the PR
+title is the commit text the notes read: `pr-title.yml` enforces Conventional Commits on it.
+
 ## Verifying against the live API
 
 Payload shapes come from the API, not from guesses: check every new endpoint against a real

@@ -1,0 +1,32 @@
+name: PR title
+
+# PRs are squash-merged, so the title becomes the commit on main and the only
+# text the generated release notes read: a title outside Conventional Commits
+# would silently weaken them.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            perf
+            chore
+            build
+            ci
+            test
+            revert
