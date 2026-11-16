@@ -6,8 +6,8 @@ instance and the shared helpers, `client.py` the authenticated HTTP client.
 
 ## Gate
 
-`./scripts/check` (lockfile, ruff, ruff format, mypy, server boot). CI runs the same script. Run it
-before every commit.
+`./scripts/check` (lockfile, ruff, ruff format, mypy, tests, server boot). CI runs the same script.
+Run it before every commit.
 
 ## Tool design
 
