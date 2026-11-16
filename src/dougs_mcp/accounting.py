@@ -9,6 +9,7 @@ import httpx
 from pydantic import Field
 
 from .client import DougsClient, DougsError, DougsJobError
+from .money import euros
 from .server import DESTRUCTIVE, READ, SENDS, compact, get_client, mcp
 
 YearId = Annotated[
@@ -146,7 +147,20 @@ def _is_series(value: Any) -> bool:
 
 
 def _round(value: Any) -> Any:
-    return round(value, 2) if isinstance(value, float) else value
+    if isinstance(value, bool) or not isinstance(value, float):
+        return value
+    return euros(value)
+
+
+def _amount_direction(amount: Any) -> str | None:
+    """Negative filings are money to pay; positive ones are a credit. Zero says neither."""
+    if isinstance(amount, bool) or not isinstance(amount, int | float):
+        return None
+    if amount < 0:
+        return "pay"
+    if amount > 0:
+        return "credit"
+    return None
 
 
 @mcp.tool(annotations=READ)
@@ -432,8 +446,8 @@ def _declaration_row(d: dict[str, Any], status: str | None) -> dict[str, Any]:
         "periodStart": d.get("periodStartDate"),
         "periodEnd": d.get("periodEndDate"),
         "dueDate": d.get("dueDate"),
-        # Negative = to pay, positive = credit.
-        "amount": d.get("summaryAmount"),
+        "amount": (amount := _round(d.get("summaryAmount"))),
+        "direction": _amount_direction(amount),
         "amountNote": (d.get("amountHelpText") or "").strip("()")
         if d.get("summaryAmount") is not None
         else None,
@@ -466,8 +480,8 @@ async def list_declarations(
 ) -> dict[str, Any]:
     """List the company's tax filings (VAT, corporate tax, CFE, accounts approval), latest due first.
 
-    Gives the period, due date, amount and filing state of each; get_declaration returns the
-    figures of one filing.
+    Gives the period, due date, filing state and amount of each. A negative amount is money to pay
+    (`direction` pay) and a positive amount is a credit (`direction` credit).
     """
     client = get_client()
     cid = await client.resolve_company_id()
@@ -550,9 +564,10 @@ def _can_cancel_correction(d: dict[str, Any]) -> bool:
 async def get_declaration(
     declaration_id: Annotated[int, Field(description="Filing id from list_declarations.")],
 ) -> dict[str, Any]:
-    """Return one tax filing with its non-zero form boxes (box code, label, amount) and files,
-    what blocks its confirmation, the statements confirming it certifies, and whether
-    confirm_declaration or revise_declaration applies."""
+    """Return one tax filing with its non-zero form boxes and files, what blocks confirmation, the
+    statements confirm_declaration certifies, and whether confirm_declaration or revise_declaration
+    applies. A negative amount is money to pay (`direction` pay) and a positive amount is a credit
+    (`direction` credit)."""
     client = get_client()
     cid = await client.resolve_company_id()
     d = await client.get(f"/companies/{cid}/declarations/{declaration_id}")
@@ -625,7 +640,9 @@ async def confirm_declaration(
     ],
 ) -> dict[str, Any]:
     """File a tax return: Dougs teletransmits it to the tax administration with the payment it
-    authorizes, or records a manual deposit as done."""
+    authorizes, or records a manual deposit as done. If reading the job fails, the answer says
+    tracking failed rather than still processing; then read get_declaration and do not call
+    confirm_declaration again."""
     if not statements_accepted:
         raise ValueError("show the user get_declaration's confirmStatements and get their consent")
     client = get_client()
@@ -645,14 +662,23 @@ async def confirm_declaration(
     job = await client.post(
         f"{path}/actions/confirm", json={"declaration": {**d, "isAcknowledged": True}}
     )
+    # The POST has already been accepted. A later failure to read the job is not "still running",
+    # and calling confirm again would file a second time.
     try:
         metadata = await client.wait_job(job, max_wait=120)
     except DougsJobError:
         raise
-    except (DougsError, httpx.HTTPError):
-        metadata = None  # the filing is submitted; only following its job failed
+    except (DougsError, httpx.HTTPError) as exc:
+        return {
+            "id": declaration_id,
+            "trackingFailed": str(exc) or exc.__class__.__name__,
+            "next": "read get_declaration and do not call confirm_declaration again",
+        }
     if metadata is None:
-        return {"id": declaration_id, "pending": "still processing; check get_declaration"}
+        return {
+            "id": declaration_id,
+            "pending": "still processing; read get_declaration and do not call confirm_declaration again",
+        }
     result = metadata.get("result") or {}
     return compact(
         {

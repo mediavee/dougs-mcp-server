@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -32,10 +33,15 @@ def _error_detail(resp: httpx.Response) -> str:
     return resp.text[:200]
 
 
-def _session_path(email: str) -> Path:
+def session_cache_dir() -> Path:
     """Per-account cookie cache, so restarting the server does not burn a login."""
-    root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "dougs-mcp"
-    return root / f"session-{hashlib.sha256(email.encode()).hexdigest()[:16]}.json"
+    root = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return root / "dougs-mcp"
+
+
+def _session_path(email: str) -> Path:
+    digest = hashlib.sha256(email.encode()).hexdigest()[:16]
+    return session_cache_dir() / f"session-{digest}.json"
 
 
 class DougsError(Exception):
@@ -113,15 +119,21 @@ class DougsClient:
         ]
         if not cookies:
             return
+        # write_text follows the umask, so the cookie existed as 0644 until chmod. Open at
+        # 0600 instead, and let a cache that cannot be written surface: swallowing it made
+        # the next call log in again, up to Dougs' 25 logins per hour.
+        parent = self._session_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        parent.chmod(0o700)
+        tmp = parent / f".{self._session_path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
         try:
-            self._session_path.parent.mkdir(parents=True, exist_ok=True)
-            # Atomic: several server instances share this file.
-            tmp = self._session_path.with_suffix(f".{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(cookies))
-            tmp.chmod(0o600)
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(cookies))
             tmp.replace(self._session_path)
-        except OSError:  # a read-only cache dir must not break the server
-            pass
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
     async def login(self) -> None:
         try:

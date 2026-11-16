@@ -1,5 +1,7 @@
 """Typed configuration loaded from environment variables (DOUGS_*) or a .env file."""
 
+from pathlib import Path
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,6 +29,13 @@ class Settings(BaseSettings):
     dougs_company_id: int | None = Field(
         None,
         description="Optional pinned company id; falls back to the user's preferred company.",
+    )
+    dougs_upload_root: Path | None = Field(
+        None,
+        description=(
+            "Directory add_attachment and upload_vendor_invoice may read. Unset refuses every "
+            "upload."
+        ),
     )
 
 

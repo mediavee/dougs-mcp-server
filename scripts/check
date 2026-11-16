@@ -5,9 +5,10 @@ cd "$(dirname "$0")/.."
 
 uv lock --check
 uv sync --locked --quiet
-uv run ruff check src
-uv run ruff format --check src
-uv run mypy src
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src tests
+uv run python -m unittest discover -s tests -q
 # Boots the server in memory: catches a dependency bump that breaks tool registration.
 uv run python - <<'PY'
 import asyncio

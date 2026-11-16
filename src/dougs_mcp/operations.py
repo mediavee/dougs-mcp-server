@@ -9,7 +9,9 @@ from urllib.parse import urlencode
 from pydantic import BaseModel, Field
 
 from .client import DougsClient
+from .money import cents, euros, format_cents
 from .server import DESTRUCTIVE, READ, SENDS, WRITE, compact, get_client, mcp
+from .uploads import require_upload_root, resolve_upload
 
 OperationId = Annotated[int, Field(description="Operation id, from list_operations.")]
 BreakdownId = Annotated[
@@ -458,8 +460,12 @@ async def update_operation(
         Field(gt=0, description="New amount in euros; expense reports and cash receipts only."),
     ] = None,
 ) -> dict[str, Any]:
-    """Set an operation's memo, or change the date or amount of an expense report or cash
-    receipt created with create_operation."""
+    """Set an operation's memo, or the date or amount of an expense report or cash receipt.
+
+    A new amount is written on the single categorizable line, old VAT amounts on that line are
+    dropped, and the call is refused when the lines no longer sum to the header. The date is
+    stored as midnight UTC, as in create_operation.
+    """
     if memo is None and date is None and amount is None:
         raise ValueError("pass at least one of memo, date or amount")
     client = get_client()
@@ -475,12 +481,44 @@ async def update_operation(
         )
     if memo is not None:
         operation["memo"] = memo
+    updated = _apply_amount(operation, amount) if amount is not None else None
     if date is not None:
         _iso_to_fr(date)  # validates the format
-        operation["date"] = date
-    if amount is not None:
-        operation["amount"] = round(amount, 2)
-    return _operation_view(await client.update_operation(cid, operation))
+        operation["date"] = f"{date}T00:00:00.000Z"
+    return _operation_view(await client.update_operation(cid, operation, updated))
+
+
+def _apply_amount(operation: dict[str, Any], amount: float) -> dict[str, Any]:
+    """Put the new amount on the only categorizable line, or refuse before anything is written."""
+    mains = _main_lines(operation)
+    if len(mains) != 1:
+        raise ValueError(
+            f"a new amount needs exactly one categorizable line; operation {operation.get('id')} "
+            f"has {len(mains)}"
+        )
+    quantized = euros(amount)
+    line = mains[0]
+    total = cents(quantized)
+    for extra in operation.get("breakdowns") or []:
+        if extra is line:
+            continue
+        raw = extra.get("amount")
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
+            raise ValueError(
+                f"line {extra.get('id')} has no numeric amount; the new total cannot be checked"
+            )
+        total += cents(raw)
+    header = cents(quantized)
+    if total != header:
+        raise ValueError(
+            f"lines sum to {format_cents(total)}, not the header {format_cents(header)}"
+        )
+    operation["amount"] = quantized
+    line["amount"] = quantized
+    # The previous VAT belongs to the old amount. updatedBreakdown is the line the API recomputes.
+    line.pop("vatAmount", None)
+    line.pop("manualVatAmount", None)
+    return line
 
 
 def _expense_partners(partners: list[dict[str, Any]], day: str) -> list[dict[str, Any]]:
@@ -529,8 +567,8 @@ async def create_operation(
     _iso_to_fr(date)  # validates the format
     client = get_client()
     cid = await client.resolve_company_id()
-    amount = round(amount, 2)
-    breakdowns: list[dict[str, Any]] = [{"amount": amount, "categoryId": category_id}]
+    rounded = euros(amount)
+    breakdowns: list[dict[str, Any]] = [{"amount": rounded, "categoryId": category_id}]
     if kind == "expense":
         partners = _expense_partners(await client.get(f"/companies/{cid}/partners"), date)
         if partner_id is None:
@@ -558,7 +596,7 @@ async def create_operation(
             "type": kind,
             "date": f"{date}T00:00:00.000Z",
             "memo": memo,
-            "amount": amount,
+            "amount": rounded,
             "breakdowns": breakdowns,
         },
     )
@@ -906,7 +944,7 @@ async def set_breakdown_vat(
     if vat_amount is not None or automatic_vat:
         if not breakdown.get("isVatAmountEditable"):
             raise ValueError(f"breakdown {breakdown_id} has no editable VAT amount")
-        updated["manualVatAmount"] = None if vat_amount is None else round(vat_amount, 2)
+        updated["manualVatAmount"] = None if vat_amount is None else euros(vat_amount)
     answers: dict[str, Any] = {}
     if subject_to_vat is not None:
         answers["hasOptionalVat"] = subject_to_vat
@@ -993,11 +1031,8 @@ async def split_operation(
     return _operation_view(await client.update_operation(cid, operation, new_breakdowns[-1]))
 
 
-def _read_upload(file_path: str) -> tuple[str, bytes, str]:
-    """Read a local file off the event loop; returns (name, bytes, content_type)."""
-    path = Path(file_path).expanduser()
-    if not path.is_file():
-        raise ValueError(f"file not found: {file_path}")
+def _read_upload(path: Path) -> tuple[str, bytes, str]:
+    """Read an already-checked file off the event loop; returns (name, bytes, content_type)."""
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return path.name, path.read_bytes(), content_type
 
@@ -1014,12 +1049,16 @@ def _receipts(op: dict[str, Any]) -> dict[str, Any]:
 @mcp.tool(annotations=WRITE)
 async def add_attachment(
     operation_id: OperationId,
-    file_path: Annotated[str, Field(description="Local PDF or image, e.g. '~/receipt.pdf'.")],
+    file_path: Annotated[
+        str, Field(description="PDF or image inside DOUGS_UPLOAD_ROOT, e.g. 'receipt.pdf'.")
+    ],
 ) -> dict[str, Any]:
-    """Attach a receipt or invoice file to an operation. Dougs files it as a vendor invoice
-    in Purchases and reads its date and amount within a few seconds."""
-    name, content, content_type = await asyncio.to_thread(_read_upload, file_path)
+    """Attach a receipt or invoice from DOUGS_UPLOAD_ROOT. Dougs files it as a vendor invoice and
+    reads its date and amount within a few seconds. Paths outside that directory, `.env`, and the
+    session cache are refused."""
     client = get_client()
+    path = resolve_upload(file_path, require_upload_root(client._s))
+    name, content, content_type = await asyncio.to_thread(_read_upload, path)
     cid = await client.resolve_company_id()
     op = await client.post(
         f"/companies/{cid}/operations/{operation_id}/source-document-attachments/actions/create-from-formdata",
