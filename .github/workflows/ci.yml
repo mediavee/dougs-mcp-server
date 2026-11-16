@@ -27,9 +27,10 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: ./scripts/check
 
-  # The only required check: branch rules name it, so jobs can change freely.
+  # The only required check: branch rules name it, so jobs can change freely. always(), not
+  # !cancelled(): a skipped required job reports success, so a cancelled run would pass.
   ci-ok:
-    if: ${{ !cancelled() }}
+    if: always()
     needs: [gate]
     runs-on: ubuntu-latest
     timeout-minutes: 2
