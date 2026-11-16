@@ -337,7 +337,8 @@ async def sync_bank_connection(
 async def list_customer_todos() -> list[dict[str, Any]]:
     """List what Dougs is waiting for from the customer (documents to attach, a VAT return to
     complete, an account to regularize), with due dates and whether each is overdue, then the
-    tips Dougs suggests (`tip: true`). resolve_customer_todo acts on them."""
+    tips Dougs suggests (`tip: true`). resolve_customer_todo acts on to-dos and tips; a task that
+    is not a to-do is listed with `actionable` false and that tool refuses it."""
     client = get_client()
     cid = await client.resolve_company_id()
     todos, tasks, tips = await asyncio.gather(
@@ -378,6 +379,8 @@ async def list_customer_todos() -> list[dict[str, Any]]:
                 "startDate": t.get("startDate"),
                 "dueDate": t.get("dueDate"),
                 "overdue": t.get("overdue") or None,
+                # customer-tasks that are not in customer-todo have no complete/ignore action.
+                "actionable": False,
             }
         )
         for t in task_by_id.values()

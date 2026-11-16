@@ -3,10 +3,10 @@
 import asyncio
 import contextlib
 from datetime import date, timedelta
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .client import DougsClient, DougsError
 from .server import DESTRUCTIVE, READ, SENDS, WRITE, compact, get_client, mcp
@@ -377,16 +377,34 @@ async def delete_customer(
 
 class InvoiceLine(BaseModel):
     title: str = Field(description="e.g. 'Développement'.")
-    quantity: float = Field(gt=0)
-    unit_amount: float = Field(ge=0, description="Unit price, excluding VAT.")
+    quantity: float = Field(
+        description="Units. Negative only on a credit-note draft, and not with a negative price."
+    )
+    unit_amount: float = Field(
+        description="Unit price excluding VAT. Negative only on a credit-note draft, and not "
+        "with a negative quantity."
+    )
     description: str = ""
     unit: str = Field("unité", description="e.g. 'jour', 'heure'.")
     vat_rate: float = Field(0.2, ge=0, le=1, description="0.2 = 20 %, 0 = exempt.")
     discount: float = Field(0, ge=0, le=100, description="Percentage.")
 
+    @model_validator(mode="after")
+    def _one_negative_side(self) -> Self:
+        if self.quantity == 0:
+            raise ValueError("quantity must not be 0")
+        if self.quantity < 0 and self.unit_amount < 0:
+            raise ValueError("set either quantity or unit_amount negative, not both")
+        return self
+
 
 Lines = Annotated[
-    list[InvoiceLine], Field(min_length=1, description="All the lines; replaces existing ones.")
+    list[InvoiceLine],
+    Field(
+        min_length=1,
+        description="All the lines; replaces existing ones. On a credit note every line is "
+        "negative, on one side only.",
+    ),
 ]
 
 
@@ -509,6 +527,11 @@ async def _edit_draft(
     if client_data is not None:
         doc["clientData"] = client_data
     if lines is not None:
+        _check_replacement_lines(
+            lines,
+            credit_note=kind == "invoice" and _stored_credit_note(doc),
+            quote=kind == "quote",
+        )
         doc["lines"] = [_line(line) for line in lines]
     if subject:
         doc["subject"] = subject
@@ -570,7 +593,8 @@ async def save_sales_invoice_draft(
     subject: Subject = "",
 ) -> dict[str, Any]:
     """Create a sales invoice draft, or change one (only the arguments passed change; a new date
-    or delay recomputes the due date). Dougs computes the totals; finalize it with
+    or delay recomputes the due date). A credit-note draft keeps negative lines: pass a negative
+    quantity or unit amount, not a mix of signs. Dougs computes the totals; finalize it with
     finalize_sales_document."""
     client = get_client()
     cid = await client.resolve_company_id()
@@ -582,6 +606,7 @@ async def save_sales_invoice_draft(
         return _document(client, cid, saved, "sales-invoice")
     if not customer or not lines:
         raise ValueError("creating a draft needs customer and lines")
+    _check_replacement_lines(lines, credit_note=False, quote=False)
     # Resolve the customer first, so a bad one leaves no empty draft behind.
     client_data = await _resolve_client(client, cid, customer)
     created = await client.post(f"/companies/{cid}/sales-invoices-drafts", json={})
@@ -685,6 +710,7 @@ async def save_quote_draft(
         return _document(client, cid, saved, "quote")
     if not customer or not lines:
         raise ValueError("creating a quote draft needs customer and lines")
+    _check_replacement_lines(lines, credit_note=False, quote=True)
     client_data = await _resolve_client(client, cid, customer)
     created = await client.post(f"/companies/{cid}/invoicing/quote-drafts", json={})
     draft_path = f"/companies/{cid}/invoicing/quote-drafts/{created['id']}"
@@ -773,6 +799,51 @@ async def finalize_sales_document(
     return _quote_url(client, cid, quote)
 
 
+def _stored_credit_note(doc: dict[str, Any]) -> bool:
+    """A refund draft: Dougs marks it, or its lines already carry a negative amount."""
+    if doc.get("isRefund") is True:
+        return True
+    for line in doc.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        for key in ("quantity", "unitAmount", "amount"):
+            value = line.get(key)
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                continue
+            if value < 0:
+                return True
+    return False
+
+
+def _check_replacement_lines(lines: list[InvoiceLine], *, credit_note: bool, quote: bool) -> None:
+    negative = [line for line in lines if line.quantity < 0 or line.unit_amount < 0]
+    positive = [line for line in lines if line.quantity > 0 and line.unit_amount > 0]
+    if negative and positive:
+        raise ValueError("a document cannot mix positive and negative lines")
+    if quote and negative:
+        raise ValueError("a quote cannot carry a negative quantity or unit amount")
+    if negative and not credit_note:
+        raise ValueError(
+            "negative lines are only for a credit-note draft created by refund_sales_invoice"
+        )
+    if credit_note and (positive or not negative):
+        raise ValueError("a credit note stays negative: pass a negative quantity or unit amount")
+
+
+def _amount_text(doc: dict[str, Any], quote: bool) -> str:
+    """The amount the document's own view shows, with its currency. EUR keeps the euro sign."""
+    primary = "totalAmountWithVat" if quote else "amount"
+    fallback = "amount" if quote else "totalAmountWithVat"
+    amount = doc.get(primary)
+    if amount is None:
+        amount = doc.get(fallback)
+    if amount is None:
+        raise ValueError("this document has no amount; pass message")
+    currency = doc.get("currency") or "EUR"
+    suffix = "€" if str(currency) == "EUR" else str(currency)
+    return f"{amount} {suffix}"
+
+
 def _email_message(doc: dict[str, Any], quote: bool, signer: str, company: str) -> str:
     """The message the app pre-fills."""
     kind = "devis" if quote else "facture"
@@ -780,9 +851,10 @@ def _email_message(doc: dict[str, Any], quote: bool, signer: str, company: str) 
     if quote and doc.get("expirationDate"):
         day = date.fromisoformat(str(doc["expirationDate"])[:10])
         expiry = f"\nDate d'expiration : {day.strftime('%d/%m/%Y')}"
+    amount = _amount_text(doc, quote)
     return (
         f"Bonjour,\n\nVeuillez trouver ci-joint votre {kind}.\n\n"
-        f"{kind.capitalize()} : {doc.get('reference')}\nMontant : {doc.get('amount')} €{expiry}\n\n"
+        f"{kind.capitalize()} : {doc.get('reference')}\nMontant : {amount}{expiry}\n\n"
         "Je vous remercie pour votre confiance et vous souhaite une excellente journée ! \n\n"
         f"{signer}\n{company}"
     )
@@ -802,7 +874,8 @@ async def send_sales_document(
         str, Field(description="Email body; default: the app's text with number and amount.")
     ] = "",
 ) -> dict[str, Any]:
-    """Email a finalized invoice or quote to the client, with its PDF attached."""
+    """Email a finalized invoice or quote to the client, with its PDF attached. The default text
+    uses the document amount and its currency, and is refused when that amount is missing."""
     client = get_client()
     cid = await client.resolve_company_id()
     quote = document == "quote"

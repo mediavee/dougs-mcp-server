@@ -10,7 +10,9 @@ from urllib.parse import quote
 from pydantic import Field
 
 from .client import DougsClient
+from .money import euros
 from .server import DESTRUCTIVE, READ, SENDS, WRITE, compact, get_client, mcp
+from .uploads import require_upload_root, resolve_upload
 
 # The list endpoint filters on these values only; "not_paid_or_partially_paid" covers both open states.
 _STATUS_FILTER = {"paid": "paid", "unpaid": "not_paid_or_partially_paid"}
@@ -46,7 +48,7 @@ def _row(inv: dict[str, Any]) -> dict[str, Any]:
             "number": inv.get("reference"),
             "date": _day(inv.get("date")),
             "amount": inv.get("amount"),
-            "vat": inv.get("vatAmount") or None,
+            "vat": inv.get("vatAmount"),
             "currency": None if inv.get("currency") == "EUR" else inv.get("currency"),
             "status": inv.get("paymentStatus"),
             "remaining": inv.get("remainingAmountDue") if open_ else None,
@@ -108,10 +110,7 @@ def _detail(inv: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _read_file(file_path: str) -> tuple[str, bytes]:
-    path = Path(file_path).expanduser()
-    if not path.is_file():
-        raise ValueError(f"no file at {path}")
+def _read_file(path: Path) -> tuple[str, bytes]:
     return path.name, path.read_bytes()
 
 
@@ -169,7 +168,7 @@ async def list_vendor_invoices(
     stats = await client.get(f"{base}/stats")
     answer: dict[str, Any] = {
         "total": total,
-        "to_pay_eur": round(stats["totalToPay"], 2),
+        "to_pay_eur": euros(stats["totalToPay"]),
         "invoices": [_row(i) for i in invoices],
     }
     if offset + len(invoices) < total:
@@ -190,17 +189,20 @@ async def get_vendor_invoice(invoice_id: InvoiceId) -> dict[str, Any]:
 @mcp.tool(annotations=WRITE)
 async def upload_vendor_invoice(
     file_path: Annotated[
-        str, Field(description="Local path of a PDF or image, e.g. '/tmp/facture-ovh.pdf'.")
+        str,
+        Field(description="PDF or image inside DOUGS_UPLOAD_ROOT, e.g. 'facture-ovh.pdf'."),
     ],
 ) -> dict[str, Any]:
-    """Upload a supplier invoice file; Dougs reads it by OCR within seconds.
+    """Upload a supplier invoice from DOUGS_UPLOAD_ROOT; Dougs reads it by OCR within seconds.
 
     Returns the new invoice; call get_vendor_invoice again once `ocr` is no longer 'initialised'
-    to see what it read, and fix it with update_vendor_invoice.
+    to see what it read, and fix it with update_vendor_invoice. Paths outside that directory,
+    `.env`, and the session cache are refused.
     """
-    name, content = await asyncio.to_thread(_read_file, file_path)
-    mime = mimetypes.guess_type(name)[0]
     client = get_client()
+    path = resolve_upload(file_path, require_upload_root(client._s))
+    name, content = await asyncio.to_thread(_read_file, path)
+    mime = mimetypes.guess_type(name)[0]
     cid = await client.resolve_company_id()
     base = f"/companies/{cid}/vendor-invoices"
     accepted = await client.get(f"{base}/file-types")
