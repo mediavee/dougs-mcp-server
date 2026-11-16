@@ -157,7 +157,7 @@ Les outils agissent sur une société par session : `get_account` liste les vôt
 | `set_breakdown_association` ✏️ | Answer one of the questions Dougs asks about a line (supplier, loan, partner, period…). |
 | `apply_to_similar_operations` ⚠️ | Copy an operation's categorization onto the operations Dougs finds similar, as the app does after a change; returns the operations it changed. |
 | `set_breakdown_vat` ✏️ | Override the VAT of one line. The rate comes from the category: change it with set_breakdown_category. |
-| `split_operation` ⚠️ | Split an operation into several categorized lines. A result with isTotalAmountValid false means the amounts do not add up. |
+| `split_operation` ⚠️ | Split an operation into several categorized lines. Fees and the bank counterpart stay; any other line left out is deleted. Refuses before writing when the signed sum of the lines and the fees differs from the operation amount by more than one cent. |
 | `add_attachment` ✏️ | Attach a receipt or invoice file to an operation. Dougs files it as a vendor invoice in Purchases and reads its date and amount within a few seconds. |
 | `remove_attachment` ✏️ | Detach a receipt from an operation. The document itself stays in Purchases as a vendor invoice; delete it there if it was attached by mistake. |
 
@@ -241,7 +241,7 @@ Les outils agissent sur une société par session : `get_account` liste les vôt
 | Outil | Ce qu'il fait |
 |---|---|
 | `get_file_url` | Turn a Dougs file path into a signed download URL (public, short-lived). |
-| `raw_get` | Authenticated GET on any Dougs API path, raw JSON back: for what no tool covers yet. |
+| `raw_get` ✏️ | Authenticated GET for a Dougs path no tool covers yet. Refuses paths containing /actions/, which can write. Not marked read-only: other paths stay open. |
 
 </details>
 
@@ -286,12 +286,12 @@ get_metrics(["chiffre-d-affaires", "charges-d-exploitation"], group="year")
   d'un redémarrage à l'autre, car Dougs limite à 25 connexions par heure et par compte ; il est
   renouvelé sur un `401`.
 - **Périmètre** : les endpoints réservés aux experts-comptables (grand livre, exports) répondent
-  `403` à un compte client et n'ont pas d'outil. `raw_get` atteint tous les autres chemins.
+  `403` à un compte client et n'ont pas d'outil. `raw_get` atteint les autres chemins, sauf ceux qui contiennent `/actions/` : ils peuvent écrire.
 
 ## Développement
 
 ```bash
-./scripts/check   # lockfile, ruff, ruff format, mypy et démarrage du serveur ; la CI lance le même
+./scripts/check   # lockfile, ruff, ruff format, mypy, tests et démarrage du serveur ; la CI lance le même
 ```
 
 [`AGENTS.md`](AGENTS.md) contient les règles de conception des outils : lisez-le avant d'en

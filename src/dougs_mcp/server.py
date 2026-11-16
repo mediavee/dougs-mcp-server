@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from typing import Annotated, Any
+from urllib.parse import unquote
 
 from fastmcp import FastMCP
 from fastmcp.server.transforms import GetToolNext, Transform
@@ -88,6 +89,21 @@ mcp.add_transform(LeanTools())
 _client: DougsClient | None = None
 
 
+def _is_mutating_get(path: str) -> bool:
+    """Return whether a GET on this path can write.
+
+    Every mutating GET in this server is under ``/actions/``. The check uses the
+    decoded path so a percent-encoded slash cannot skip it.
+    """
+    decoded = path
+    for _ in range(3):
+        nxt = unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    return "/actions/" in decoded.lower()
+
+
 def get_client() -> DougsClient:
     global _client
     if _client is None:
@@ -106,14 +122,21 @@ async def get_file_url(
     return {"url": await get_client().resolve_file_url(path)}
 
 
-@mcp.tool(annotations=READ)
+@mcp.tool(annotations=WRITE)
 async def raw_get(
     path: Annotated[
         str, Field(description="API path, e.g. '/companies/12345/vat-configurations'.")
     ],
     params: Annotated[dict[str, Any] | None, Field(description="Query parameters.")] = None,
 ) -> Any:
-    """Authenticated GET on any Dougs API path, raw JSON back: for what no tool covers yet."""
+    """Authenticated GET for a Dougs path no tool covers yet. Refuses paths
+    containing /actions/, which can write. Not marked read-only: other paths
+    stay open."""
     if not path.startswith("/"):
         path = "/" + path
+    if _is_mutating_get(path):
+        raise ValueError(
+            f"raw_get refuses '{path}': paths containing /actions/ can change data. "
+            "Use the tool that owns that action."
+        )
     return await get_client().get(path, params=params)

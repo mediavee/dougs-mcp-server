@@ -2,6 +2,7 @@
 
 import asyncio
 import mimetypes
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
@@ -931,12 +932,81 @@ class SplitLine(BaseModel):
     )
     breakdown_id: int | None = Field(
         None,
-        description="Existing line to keep, with its answers and VAT overrides; omit for a new one.",
+        description="Existing line to keep, with its answers; omit for a new one. A new "
+        "amount or category drops that line's previous VAT amounts.",
     )
     wording: str | None = Field(None, description="Optional label for the line.")
     is_inbound: bool | None = Field(
         None, description="Direction; defaults to the operation's, flip it for a partial refund."
     )
+
+
+def _cents(amount: float) -> int:
+    """Round a euro amount to integer cents, half up, from its decimal text."""
+    quantized = (Decimal(str(amount)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(quantized)
+
+
+def _signed_cents(amount: float, inbound: bool) -> int:
+    signed = amount if inbound else -amount
+    cents = _cents(abs(signed))
+    return cents if signed >= 0 else -cents
+
+
+def _format_cents(cents: int) -> str:
+    sign = "-" if cents < 0 else ""
+    absolute = abs(cents)
+    return f"{sign}{absolute // 100}.{absolute % 100:02d}"
+
+
+def _as_amount(value: object, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{what} has no numeric amount; the split cannot be checked")
+    return float(value)
+
+
+def _line_direction(operation: dict[str, Any], line: SplitLine) -> bool:
+    if line.is_inbound is not None:
+        return line.is_inbound
+    return bool(operation.get("isInbound"))
+
+
+def _fee_lines(operation: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        b
+        for b in operation.get("breakdowns") or []
+        if b.get("isFee") and not b.get("isCounterpart")
+    ]
+
+
+def _require_balanced(operation: dict[str, Any], lines: list[SplitLine]) -> None:
+    """Refuse when the signed lines, fees included, miss the operation by over one cent."""
+    amount = _as_amount(operation.get("amount"), f"operation {operation.get('id')}")
+    expected = _signed_cents(amount, bool(operation.get("isInbound")))
+    got = 0
+    for line in lines:
+        got += _signed_cents(line.amount, _line_direction(operation, line))
+    for fee in _fee_lines(operation):
+        got += _signed_cents(
+            _as_amount(fee.get("amount"), f"fee {fee.get('id')}"), bool(fee.get("isInbound"))
+        )
+    if abs(got - expected) > 1:
+        raise ValueError(
+            f"signed sum of the lines is {_format_cents(got)}, the operation amount is "
+            f"{_format_cents(expected)}; they must match within one cent (fees included; "
+            "each line amount is positive and is_inbound sets its sign)"
+        )
+
+
+def _amount_changed(existing: dict[str, Any], line: SplitLine) -> bool:
+    previous = existing.get("amount")
+    if isinstance(previous, bool) or not isinstance(previous, int | float):
+        return True
+    return _cents(float(previous)) != _cents(line.amount)
+
+
+def _category_changed(existing: dict[str, Any], line: SplitLine) -> bool:
+    return line.category_id is not None and line.category_id != existing.get("categoryId")
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -946,13 +1016,17 @@ async def split_operation(
         list[SplitLine],
         Field(
             min_length=1,
-            description="Replaces every line but the bank counterpart; lines left out are "
-            "deleted. Amounts should add up to the operation's.",
+            description="Replaces every categorizable line. Fees and the bank counterpart "
+            "stay; any other line left out is deleted. Amounts are positive and "
+            "is_inbound sets the sign; with the fees, the signed sum must match the "
+            "operation within one cent.",
         ),
     ],
 ) -> dict[str, Any]:
-    """Split an operation into several categorized lines. A result with isTotalAmountValid
-    false means the amounts do not add up."""
+    """Split an operation into several categorized lines. Fees and the bank
+    counterpart stay; any other line left out is deleted. Refuses before writing
+    when the signed sum of the lines and the fees differs from the operation
+    amount by more than one cent."""
     client = get_client()
     cid = await client.resolve_company_id()
     operation = await client.operation(cid, operation_id)
@@ -969,16 +1043,16 @@ async def split_operation(
         raise ValueError(
             f"breakdown_id must name distinct categorizable lines; they are {sorted(main_ids)}"
         )
+    _require_balanced(operation, lines)
     new_breakdowns: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
     for line in lines:
         existing = (
             _find_breakdown(operation, line.breakdown_id) if line.breakdown_id is not None else None
         )
         breakdown: dict[str, Any] = dict(existing) if existing else {"section": section}
         breakdown["amount"] = line.amount
-        breakdown["isInbound"] = (
-            line.is_inbound if line.is_inbound is not None else bool(operation.get("isInbound"))
-        )
+        breakdown["isInbound"] = _line_direction(operation, line)
         if line.wording is not None:
             breakdown["wording"] = line.wording
         if line.category_id is not None:
@@ -987,10 +1061,21 @@ async def split_operation(
             breakdown["categoryWording"] = category.get("wording")
         elif not existing:
             breakdown["categoryWording"] = "Non catégorisé"
+        # update_operation names one breakdown for VAT recomputation. A line whose
+        # amount or category changed must not keep the previous VAT amounts.
+        if existing is not None and (
+            _amount_changed(existing, line) or _category_changed(existing, line)
+        ):
+            breakdown.pop("vatAmount", None)
+            breakdown.pop("manualVatAmount", None)
+            changed.append(breakdown)
+        elif existing is None:
+            changed.append(breakdown)
         new_breakdowns.append(breakdown)
 
     operation["breakdowns"] = new_breakdowns + kept
-    return _operation_view(await client.update_operation(cid, operation, new_breakdowns[-1]))
+    updated = changed[-1] if changed else new_breakdowns[-1]
+    return _operation_view(await client.update_operation(cid, operation, updated))
 
 
 def _read_upload(file_path: str) -> tuple[str, bytes, str]:
